@@ -87,6 +87,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   final FocusNode _playPauseFocus = FocusNode(debugLabel: 'playpause');
   final FocusNode _seekFocus = FocusNode(debugLabel: 'seek');
   bool _scrubbing = false; // seek-bar "scrub mode" active
+  int _scrubStartMs = 0; // position when scrub began (for cancel)
+  bool _wasPlayingBeforeScrub = false;
   String? _subtitleText; // current subtitle, rendered by our own overlay
 
   int get _now => DateTime.now().millisecondsSinceEpoch;
@@ -681,6 +683,42 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }
   }
 
+  // ---- Scrub mode (seek bar) ---------------------------------------------
+
+  void _enterScrub() {
+    _scrubStartMs = _position.inMilliseconds;
+    _wasPlayingBeforeScrub = _playing;
+    _controller?.pause(); // pause while scrubbing
+    setState(() => _scrubbing = true);
+    _restartHideTimer();
+  }
+
+  void _scrubSeek(int deltaMs) {
+    final dur = _duration.inMilliseconds;
+    var t = _position.inMilliseconds + deltaMs;
+    if (t < 0) t = 0;
+    if (dur > 0 && t > dur) t = dur;
+    _controller?.seekTo(Duration(milliseconds: t)); // paused preview frame
+    _restartHideTimer();
+  }
+
+  // Confirm the scrub: keep the new position, stay paused, focus play/pause so
+  // the user can press play to resume.
+  void _commitScrub() {
+    setState(() => _scrubbing = false);
+    _playPauseFocus.requestFocus();
+    _restartHideTimer();
+  }
+
+  // Cancel (Back): return to where scrubbing started and restore playback.
+  void _cancelScrub() {
+    _controller?.seekTo(Duration(milliseconds: _scrubStartMs));
+    if (_wasPlayingBeforeScrub) _controller?.play();
+    setState(() => _scrubbing = false);
+    _playPauseFocus.requestFocus();
+    _restartHideTimer();
+  }
+
   void _revealControls({bool focusPlay = false}) {
     final wasHidden = !_showControls;
     setState(() => _showControls = true);
@@ -776,6 +814,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       canPop: false,
       onPopInvokedWithResult: (didPop, _) async {
         if (didPop) return;
+        if (_scrubbing) {
+          _cancelScrub(); // Back during scrubbing cancels, doesn't exit
+          return;
+        }
         final leave = await _confirmExit();
         if (!context.mounted) return;
         if (leave) context.pop();
@@ -986,14 +1028,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                       duration: _duration,
                       focusNode: _seekFocus,
                       scrubbing: _scrubbing,
-                      onScrubChanged: (v) {
-                        setState(() => _scrubbing = v);
-                        _restartHideTimer();
-                      },
-                      onSeekStep: (delta) {
-                        _seekBy(delta);
-                        _restartHideTimer();
-                      },
+                      onEnterScrub: _enterScrub,
+                      onCommitScrub: _commitScrub,
+                      onCancelScrub: _cancelScrub,
+                      onSeekStep: _scrubSeek,
                       onSeekTo: (p) {
                         _controller?.seekTo(p);
                         _controller?.play();
@@ -1115,7 +1153,9 @@ class _SeekBar extends StatefulWidget {
     required this.duration,
     required this.focusNode,
     required this.scrubbing,
-    required this.onScrubChanged,
+    required this.onEnterScrub,
+    required this.onCommitScrub,
+    required this.onCancelScrub,
     required this.onSeekStep,
     required this.onSeekTo,
   });
@@ -1124,7 +1164,9 @@ class _SeekBar extends StatefulWidget {
   final Duration duration;
   final FocusNode focusNode;
   final bool scrubbing;
-  final ValueChanged<bool> onScrubChanged;
+  final VoidCallback onEnterScrub;
+  final VoidCallback onCommitScrub;
+  final VoidCallback onCancelScrub;
   final void Function(int deltaMs) onSeekStep;
   final void Function(Duration pos) onSeekTo;
 
@@ -1144,13 +1186,15 @@ class _SeekBarState extends State<_SeekBar> {
   };
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
-    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    // Handle both the initial press and auto-repeats (holding to seek); ignore
+    // key-up only.
+    final isDown = event is KeyDownEvent;
+    final isRepeat = event is KeyRepeatEvent;
+    if (!isDown && !isRepeat) return KeyEventResult.ignored;
     final k = event.logicalKey;
-    if (_selectKeys.contains(k)) {
-      widget.onScrubChanged(!widget.scrubbing);
-      return KeyEventResult.handled;
-    }
+
     if (widget.scrubbing) {
+      // Left/Right seek on press AND while held; consumed so focus never moves.
       if (k == LogicalKeyboardKey.arrowLeft) {
         widget.onSeekStep(-30000);
         return KeyEventResult.handled;
@@ -1159,17 +1203,28 @@ class _SeekBarState extends State<_SeekBar> {
         widget.onSeekStep(30000);
         return KeyEventResult.handled;
       }
-      if (k == LogicalKeyboardKey.arrowUp ||
-          k == LogicalKeyboardKey.arrowDown ||
-          k == LogicalKeyboardKey.goBack ||
-          k == LogicalKeyboardKey.escape) {
-        // Exit scrub mode and let the arrow also move focus away.
-        widget.onScrubChanged(false);
-        return KeyEventResult.ignored;
+      if (isDown) {
+        if (_selectKeys.contains(k) ||
+            k == LogicalKeyboardKey.arrowUp ||
+            k == LogicalKeyboardKey.arrowDown) {
+          widget.onCommitScrub();
+          return KeyEventResult.handled;
+        }
+        if (k == LogicalKeyboardKey.goBack ||
+            k == LogicalKeyboardKey.escape) {
+          widget.onCancelScrub();
+          return KeyEventResult.handled;
+        }
       }
+      // Consume everything else (incl. repeats) so focus can't move mid-scrub.
       return KeyEventResult.handled;
     }
-    // Not scrubbing: arrows fall through to move focus to other controls.
+
+    // Not scrubbing: Select/Enter starts scrubbing; arrows move focus normally.
+    if (isDown && _selectKeys.contains(k)) {
+      widget.onEnterScrub();
+      return KeyEventResult.handled;
+    }
     return KeyEventResult.ignored;
   }
 
