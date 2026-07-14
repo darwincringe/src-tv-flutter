@@ -1,12 +1,11 @@
 import 'dart:async';
 
+import 'package:better_player_plus/better_player_plus.dart';
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:file_selector/file_selector.dart';
-import 'package:media_kit/media_kit.dart';
-import 'package:media_kit_video/media_kit_video.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
@@ -26,6 +25,9 @@ class _EpisodeRef {
   const _EpisodeRef(this.season, this.episode);
 }
 
+/// Video player built on better_player_plus (ExoPlayer/AVPlayer). ExoPlayer
+/// renders through a Surface, so playback is smooth even where a texture-based
+/// player struggles. Custom overlay controls give clear D-pad focus.
 class PlayerScreen extends ConsumerStatefulWidget {
   const PlayerScreen({super.key, required this.args});
   final PlayerArgs args;
@@ -42,11 +44,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/120.0 Safari/537.36';
 
-  late final Player _player;
-  late final VideoController _controller;
-  final List<StreamSubscription> _subs = [];
-  Timer? _saveTimer;
+  BetterPlayerController? _controller;
+  Timer? _tick;
   Timer? _hideTimer;
+  int _ticks = 0;
 
   // Playback target (mutable so we can advance episodes).
   late PlayerMode _mode;
@@ -66,13 +67,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   _EpisodeRef? _prevRef;
 
   // Streaming state
-  String? _hlsUrl;
-  List<String> _apiSubs = [];
-  final List<String> _uploadedSubs = [];
-  String? _currentSubUri; // null == off
-  int _retryCount = 0;
+  final List<SubtitleOption> _uploadedSubs = [];
   int _resumeTargetMs = 0;
   bool _resumeDone = true;
+  int _retryCount = 0;
 
   // UI state
   bool _loading = true;
@@ -82,7 +80,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   bool _showNextOverlay = false;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
-  double? _dragValue; // slider value while actively scrubbing
+  double? _dragValue;
 
   int get _now => DateTime.now().millisecondsSinceEpoch;
 
@@ -91,7 +89,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     super.initState();
     PlayerRuntime.isOpen = true;
     WidgetsBinding.instance.addObserver(this);
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
 
     final a = widget.args;
     _mode = a.mode;
@@ -101,57 +98,65 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _episode = a.episode;
     _trailerKey = a.trailerKey;
 
-    // Larger demuxer cache smooths HLS network hitches.
-    _player = Player(
-      configuration: const PlayerConfiguration(
-        bufferSize: 64 * 1024 * 1024,
-      ),
-    );
-    _controller = VideoController(_player);
-    _wireStreams();
     _resolveAndPlay();
   }
 
-  void _wireStreams() {
-    _subs.add(_player.stream.position.listen((p) {
-      _position = p;
-      _applyResumeSeek(p);
-      _updateNextOverlay();
-      // Only repaint the overlay when it's visible; avoids rebuilding the whole
-      // player tree several times a second during playback (reduces stutter).
-      if (mounted && _showControls) setState(() {});
-    }));
-    _subs.add(_player.stream.duration.listen((d) {
-      _duration = d;
-      if (mounted) setState(() {});
-    }));
-    _subs.add(_player.stream.playing.listen((playing) {
-      _playing = playing;
-      if (playing) {
-        WakelockPlus.enable();
-      } else {
-        WakelockPlus.disable();
-      }
-      if (mounted) setState(() {});
-    }));
-    _subs.add(_player.stream.completed.listen((done) {
-      if (done) _onCompleted();
-    }));
-    _subs.add(_player.stream.error.listen((e) {
-      _retryOrError('Playback error');
-    }));
+  BetterPlayerController _buildController() {
+    return BetterPlayerController(
+      BetterPlayerConfiguration(
+        fit: BoxFit.contain,
+        autoPlay: true,
+        handleLifecycle: false,
+        autoDispose: false,
+        expandToFill: true,
+        errorBuilder: (context, msg) => const SizedBox.shrink(),
+        controlsConfiguration: const BetterPlayerControlsConfiguration(
+          showControls: false,
+        ),
+        subtitlesConfiguration: const BetterPlayerSubtitlesConfiguration(
+          fontSize: 20,
+          fontColor: Colors.white,
+          outlineEnabled: true,
+          outlineColor: Colors.black,
+          outlineSize: 2.5,
+          backgroundColor: Colors.transparent,
+          bottomPadding: 24,
+        ),
+        eventListener: _onEvent,
+      ),
+    );
   }
 
-  /// Applies the one-shot resume seek once playback has genuinely started
-  /// (position advancing and duration known). Seeking earlier makes the media
-  /// snap back to 0.
-  void _applyResumeSeek(Duration p) {
-    if (_resumeDone || _resumeTargetMs <= 0) return;
-    if (_duration.inMilliseconds > 0 && p.inMilliseconds >= 500) {
-      _resumeDone = true;
-      final target = _resumeTargetMs;
-      _resumeTargetMs = 0;
-      _player.seek(Duration(milliseconds: target));
+  void _onEvent(BetterPlayerEvent event) {
+    switch (event.betterPlayerEventType) {
+      case BetterPlayerEventType.initialized:
+        if (_resumeTargetMs > 0) {
+          _controller?.seekTo(Duration(milliseconds: _resumeTargetMs));
+          _resumeTargetMs = 0;
+        }
+        _resumeDone = true;
+        _retryCount = 0;
+        if (mounted) setState(() => _loading = false);
+        _startTick();
+        break;
+      case BetterPlayerEventType.play:
+        _playing = true;
+        WakelockPlus.enable();
+        if (mounted) setState(() {});
+        break;
+      case BetterPlayerEventType.pause:
+        _playing = false;
+        WakelockPlus.disable();
+        if (mounted) setState(() {});
+        break;
+      case BetterPlayerEventType.finished:
+        _onCompleted();
+        break;
+      case BetterPlayerEventType.exception:
+        _retryOrError('Playback error');
+        break;
+      default:
+        break;
     }
   }
 
@@ -181,8 +186,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         _retryOrError('Trailer unavailable');
         return;
       }
-      await _player.open(Media(sources.videoUrl), play: true);
-      if (mounted) setState(() => _loading = false);
+      _controller ??= _buildController();
+      await _controller!.setupDataSource(
+        BetterPlayerDataSource(
+          BetterPlayerDataSourceType.network,
+          sources.videoUrl,
+        ),
+      );
     } catch (_) {
       _retryOrError('Trailer unavailable');
     }
@@ -201,10 +211,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         _retryOrError(res.error ?? 'No playable source found');
         return;
       }
-      _hlsUrl = res.hlsUrl;
-      _apiSubs = res.subtitles;
 
-      // Fetch title/seasons/poster once.
       if (_mediaTitle == null) {
         try {
           final d = await repo.details(_type, _tmdbId);
@@ -224,25 +231,22 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         }
       }
       _computeEpisodeRefs();
-      final resumeMs = _savedResumePosition();
-      _resumeTargetMs = resumeMs;
-      _resumeDone = resumeMs <= 0;
+      _resumeTargetMs = _savedResumePosition();
+      _resumeDone = _resumeTargetMs <= 0;
 
-      // Play from the start, then jump to the saved position once real playback
-      // has begun (see _applyResumeSeek). Seeking before the media is fully
-      // loaded makes it snap back to 0.
-      await _player.open(
-        Media(_hlsUrl!, httpHeaders: {'User-Agent': _userAgent}),
-        play: true,
+      final subs = _buildSubtitleSources(res.subtitles);
+      _controller ??= _buildController();
+      await _controller!.setupDataSource(
+        BetterPlayerDataSource(
+          BetterPlayerDataSourceType.network,
+          res.hlsUrl!,
+          videoFormat: BetterPlayerVideoFormat.hls,
+          headers: const {'User-Agent': _userAgent},
+          subtitles: subs,
+          useAsmsSubtitles: false,
+          useAsmsTracks: true,
+        ),
       );
-      _applyDefaultSubtitle();
-      _startSaveLoop();
-      if (mounted) {
-        setState(() {
-          _loading = false;
-          _retryCount = 0;
-        });
-      }
     } catch (_) {
       _retryOrError('Playback error');
     }
@@ -276,42 +280,35 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   // ---- Subtitles ---------------------------------------------------------
 
-  List<SubtitleOption> get _subtitleOptions => [
-        ...apiSubtitleOptions(_apiSubs),
-        for (var i = 0; i < _uploadedSubs.length; i++)
-          uploadedSubtitleOption(_uploadedSubs[i], i),
-      ];
-
-  void _applyDefaultSubtitle() {
-    final opts = _subtitleOptions;
-    if (opts.isEmpty) return;
-    // Prefer English (case-insensitive, match "en"/"eng"/"english" in the
-    // detected language or the label); otherwise fall back to the first track.
-    SubtitleOption? chosen;
-    for (final o in opts) {
+  List<BetterPlayerSubtitlesSource> _buildSubtitleSources(
+    List<String> apiUrls,
+  ) {
+    final opts = [
+      ...apiSubtitleOptions(apiUrls),
+      for (var i = 0; i < _uploadedSubs.length; i++) _uploadedSubs[i],
+    ];
+    // Prefer English (case-insensitive) as the default; else the first track.
+    int defaultIndex = opts.indexWhere((o) {
       final lang = (o.language ?? '').toLowerCase();
       final label = o.label.toLowerCase();
-      if (lang == 'en' ||
+      return lang == 'en' ||
           lang.contains('eng') ||
           label.contains('eng') ||
-          label.contains('english')) {
-        chosen = o;
-        break;
-      }
-    }
-    _selectSubtitle(chosen ?? opts.first);
-  }
+          label.contains('english');
+    });
+    if (defaultIndex < 0 && opts.isNotEmpty) defaultIndex = 0;
 
-  void _selectSubtitle(SubtitleOption? opt) {
-    if (opt == null) {
-      _player.setSubtitleTrack(SubtitleTrack.no());
-      setState(() => _currentSubUri = null);
-      return;
-    }
-    _player.setSubtitleTrack(
-      SubtitleTrack.uri(opt.uri, title: opt.label, language: opt.language),
-    );
-    setState(() => _currentSubUri = opt.uri);
+    return [
+      for (var i = 0; i < opts.length; i++)
+        BetterPlayerSubtitlesSource(
+          type: opts[i].uri.startsWith('http')
+              ? BetterPlayerSubtitlesSourceType.network
+              : BetterPlayerSubtitlesSourceType.file,
+          name: opts[i].label,
+          urls: [opts[i].uri],
+          selectedByDefault: i == defaultIndex,
+        ),
+    ];
   }
 
   Future<void> _uploadSubtitle() async {
@@ -321,8 +318,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     );
     final file = await openFile(acceptedTypeGroups: [group]);
     if (file == null) return;
-    setState(() => _uploadedSubs.add(file.path));
-    _selectSubtitle(uploadedSubtitleOption(file.path, _uploadedSubs.length - 1));
+    final opt = uploadedSubtitleOption(file.path, _uploadedSubs.length);
+    _uploadedSubs.add(opt);
+    final source = BetterPlayerSubtitlesSource(
+      type: BetterPlayerSubtitlesSourceType.file,
+      name: opt.label,
+      urls: [opt.uri],
+    );
+    _controller?.betterPlayerSubtitlesSourceList.add(source);
+    _controller?.setupSubtitleSource(source);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Subtitle added')),
@@ -330,18 +334,109 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }
   }
 
+  void _showSubtitleDialog() {
+    final list = _controller?.betterPlayerSubtitlesSourceList ?? [];
+    final selectable = list
+        .where((s) => s.type != BetterPlayerSubtitlesSourceType.none)
+        .toList();
+    if (selectable.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No subtitles available')),
+      );
+      return;
+    }
+    final current = _controller?.betterPlayerSubtitlesSource;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        backgroundColor: AppColors.charcoalLight,
+        title: const Text('Subtitles',
+            style: TextStyle(color: AppColors.textPrimary)),
+        children: [
+          _dialogOption(
+            ctx,
+            'Off',
+            current == null ||
+                current.type == BetterPlayerSubtitlesSourceType.none,
+            () {
+              final none = list.firstWhere(
+                (s) => s.type == BetterPlayerSubtitlesSourceType.none,
+                orElse: () => BetterPlayerSubtitlesSource(
+                    type: BetterPlayerSubtitlesSourceType.none),
+              );
+              _controller?.setupSubtitleSource(none);
+            },
+          ),
+          for (final s in selectable)
+            _dialogOption(ctx, s.name ?? 'Subtitle', current == s,
+                () => _controller?.setupSubtitleSource(s)),
+        ],
+      ),
+    );
+  }
+
   // ---- Quality -----------------------------------------------------------
 
-  List<VideoTrack> get _qualityTracks {
+  void _showQualityDialog() {
+    final controller = _controller;
+    if (controller == null) return;
+    final tracks = <BetterPlayerAsmsTrack>[];
     final seen = <int>{};
-    final out = <VideoTrack>[];
-    for (final t in _player.state.tracks.video) {
-      final h = t.h;
-      if (h == null || h <= 0) continue;
-      if (seen.add(h)) out.add(t);
+    for (final t in controller.betterPlayerAsmsTracks) {
+      final h = t.height ?? 0;
+      if (h <= 0) continue;
+      if (seen.add(h)) tracks.add(t);
     }
-    out.sort((a, b) => (b.h ?? 0).compareTo(a.h ?? 0));
-    return out;
+    tracks.sort((a, b) => (b.height ?? 0).compareTo(a.height ?? 0));
+    if (tracks.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Only one quality available')),
+      );
+      return;
+    }
+    final currentHeight = controller.betterPlayerAsmsTrack?.height ?? 0;
+    final isAuto = currentHeight <= 0;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        backgroundColor: AppColors.charcoalLight,
+        title: const Text('Quality',
+            style: TextStyle(color: AppColors.textPrimary)),
+        children: [
+          _dialogOption(ctx, 'Auto', isAuto,
+              () => controller.setTrack(BetterPlayerAsmsTrack.defaultTrack())),
+          for (final t in tracks)
+            _dialogOption(ctx, '${t.height}p',
+                !isAuto && currentHeight == t.height,
+                () => controller.setTrack(t)),
+        ],
+      ),
+    );
+  }
+
+  Widget _dialogOption(
+    BuildContext ctx,
+    String label,
+    bool selected,
+    VoidCallback onTap,
+  ) {
+    return SimpleDialogOption(
+      onPressed: () {
+        onTap();
+        Navigator.pop(ctx);
+      },
+      child: Row(
+        children: [
+          Icon(
+            selected ? Icons.radio_button_checked : Icons.radio_button_off,
+            color: selected ? AppColors.textPrimary : AppColors.textSecondary,
+            size: 18,
+          ),
+          const SizedBox(width: 12),
+          Text(label, style: const TextStyle(color: AppColors.textPrimary)),
+        ],
+      ),
+    );
   }
 
   // ---- Episodes ----------------------------------------------------------
@@ -361,36 +456,31 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     final e = _episode!;
     final count = _episodeCount(s);
 
-    // Next
     if (e < count) {
       _nextRef = _EpisodeRef(s, e + 1);
     } else {
-      final laterSeasons = _seasons
+      final later = _seasons
           .where((x) => x.seasonNumber > s && (x.episodeCount ?? 0) > 0)
           .toList()
         ..sort((a, b) => a.seasonNumber.compareTo(b.seasonNumber));
-      if (laterSeasons.isNotEmpty) {
-        _nextRef = _EpisodeRef(laterSeasons.first.seasonNumber, 1);
-      }
+      if (later.isNotEmpty) _nextRef = _EpisodeRef(later.first.seasonNumber, 1);
     }
 
-    // Prev
     if (e > 1) {
       _prevRef = _EpisodeRef(s, e - 1);
     } else {
-      final earlierSeasons = _seasons
+      final earlier = _seasons
           .where((x) => x.seasonNumber < s && (x.episodeCount ?? 0) > 0)
           .toList()
         ..sort((a, b) => b.seasonNumber.compareTo(a.seasonNumber));
-      if (earlierSeasons.isNotEmpty) {
-        final prev = earlierSeasons.first;
-        _prevRef = _EpisodeRef(prev.seasonNumber, prev.episodeCount ?? 1);
+      if (earlier.isNotEmpty) {
+        _prevRef =
+            _EpisodeRef(earlier.first.seasonNumber, earlier.first.episodeCount ?? 1);
       }
     }
   }
 
   void _playEpisode(_EpisodeRef ref) {
-    _saveTimer?.cancel();
     setState(() {
       _season = ref.season;
       _episode = ref.episode;
@@ -403,30 +493,36 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   // ---- Progress ----------------------------------------------------------
 
-  void _startSaveLoop() {
-    _saveTimer?.cancel();
-    _saveTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      _saveProgress();
+  void _startTick() {
+    _tick?.cancel();
+    _ticks = 0;
+    _tick = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      final v = _controller?.videoPlayerController?.value;
+      if (v == null || !v.initialized) return;
+      _position = v.position;
+      _duration = v.duration ?? Duration.zero;
+      _updateNextOverlay();
+      _ticks++;
+      if (_ticks % 60 == 0) _saveProgress(); // every 30s
+      if (mounted && _showControls && _dragValue == null) setState(() {});
     });
   }
 
   void _updateNextOverlay() {
     if (_mode != PlayerMode.stream) return;
     final dur = _duration.inMilliseconds;
-    final show = dur > 0 &&
-        _position.inMilliseconds >= dur * 0.95 &&
-        _nextRef != null;
-    if (show != _showNextOverlay) {
+    final show =
+        dur > 0 && _position.inMilliseconds >= dur * 0.95 && _nextRef != null;
+    if (show != _showNextOverlay && mounted) {
       setState(() => _showNextOverlay = show);
     }
   }
 
   void _saveProgress() {
     if (_mode != PlayerMode.stream) return;
-    // Don't overwrite the saved position before the resume seek has applied.
     if (!_resumeDone) return;
-    final pos = _player.state.position.inMilliseconds;
-    final dur = _player.state.duration.inMilliseconds;
+    final pos = _position.inMilliseconds;
+    final dur = _duration.inMilliseconds;
     if (dur <= 0) return;
     if (pos >= dur * 0.95) {
       _markReachedEnd();
@@ -461,7 +557,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         completed: false,
       ));
     } else {
-      final dur = _player.state.duration.inMilliseconds;
+      final dur = _duration.inMilliseconds;
       WatchProgressStore.save(WatchProgress(
         tmdbId: _tmdbId,
         type: _type,
@@ -490,7 +586,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     var target = _position.inMilliseconds + deltaMs;
     if (target < 0) target = 0;
     if (dur > 0 && target > dur) target = dur;
-    _player.seek(Duration(milliseconds: target));
+    _controller?.seekTo(Duration(milliseconds: target));
+  }
+
+  void _togglePlay() {
+    if (_playing) {
+      _controller?.pause();
+    } else {
+      _controller?.play();
+    }
   }
 
   void _revealControls() {
@@ -520,7 +624,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   Future<bool> _confirmExit() async {
-    _player.pause();
+    _controller?.pause();
     final leave = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -546,22 +650,19 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       ActivePlayback.clear();
       return true;
     }
-    _player.play();
+    _controller?.play();
     return false;
   }
 
   @override
   void dispose() {
     PlayerRuntime.isOpen = false;
-    _saveTimer?.cancel();
+    _tick?.cancel();
     _hideTimer?.cancel();
-    for (final s in _subs) {
-      s.cancel();
-    }
-    _player.dispose();
+    _saveProgress();
+    _controller?.dispose();
     WakelockPlus.disable();
     WidgetsBinding.instance.removeObserver(this);
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();
   }
 
@@ -596,34 +697,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
             child: Stack(
               fit: StackFit.expand,
               children: [
-                Video(
-                  controller: _controller,
-                  controls: NoVideoControls,
-                  fit: BoxFit.contain,
-                  subtitleViewConfiguration: const SubtitleViewConfiguration(
-                    padding: EdgeInsets.fromLTRB(24, 24, 24, 48),
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 34,
-                      fontWeight: FontWeight.w600,
-                      height: 1.3,
-                      backgroundColor: Color(0x00000000),
-                      shadows: [
-                        Shadow(blurRadius: 6, color: Color(0xE6000000)),
-                        Shadow(
-                          offset: Offset(1.5, 1.5),
-                          blurRadius: 5,
-                          color: Color(0xE6000000),
-                        ),
-                        Shadow(
-                          offset: Offset(-1.5, -1.5),
-                          blurRadius: 5,
-                          color: Color(0xE6000000),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
+                if (_controller != null)
+                  BetterPlayer(controller: _controller!),
                 if (_loading)
                   const Center(
                     child: CircularProgressIndicator(color: Colors.white),
@@ -659,9 +734,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                 _resolveAndPlay();
               }
             },
-            child: Text(isTrailer && _trailerKey != null
-                ? 'Open in YouTube'
-                : 'Retry'),
+            child: Text(
+                isTrailer && _trailerKey != null ? 'Open in YouTube' : 'Retry'),
           ),
         ],
       ),
@@ -712,15 +786,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       ),
       child: Column(
         children: [
-          // Top bar: back + title
           SafeArea(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               child: Row(
                 children: [
-                  IconButton(
-                    icon: const Icon(Icons.arrow_back, color: Colors.white),
-                    onPressed: () async {
+                  _FocusIconButton(
+                    icon: Icons.arrow_back,
+                    onTap: () async {
                       final leave = await _confirmExit();
                       if (!mounted) return;
                       if (leave) context.pop();
@@ -733,38 +806,36 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
             ),
           ),
           const Spacer(),
-          // Center transport
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               if (isStream && _prevRef != null)
-                _ControlButton(
+                _FocusIconButton(
                   icon: Icons.skip_previous,
                   onTap: () => _playEpisode(_prevRef!),
                 ),
-              _ControlButton(
+              _FocusIconButton(
                 icon: Icons.replay_30,
                 onTap: () => _seekBy(-_seekStepMs),
               ),
-              _ControlButton(
+              _FocusIconButton(
                 icon: _playing ? Icons.pause_circle : Icons.play_circle,
                 size: 64,
                 autofocus: true,
-                onTap: () => _player.playOrPause(),
+                onTap: _togglePlay,
               ),
-              _ControlButton(
+              _FocusIconButton(
                 icon: Icons.forward_30,
                 onTap: () => _seekBy(_seekStepMs),
               ),
               if (isStream && _nextRef != null)
-                _ControlButton(
+                _FocusIconButton(
                   icon: Icons.skip_next,
                   onTap: () => _playEpisode(_nextRef!),
                 ),
             ],
           ),
           const Spacer(),
-          // Bottom bar: position, slider, duration, subs, quality
           SafeArea(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
@@ -785,7 +856,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                       onChangeStart: (_) => _revealControls(),
                       onChanged: (v) => setState(() => _dragValue = v),
                       onChangeEnd: (v) {
-                        _player.seek(Duration(milliseconds: v.toInt()));
+                        _controller?.seekTo(Duration(milliseconds: v.toInt()));
                         setState(() => _dragValue = null);
                       },
                     ),
@@ -793,22 +864,19 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   Text(_fmt(_duration),
                       style: const TextStyle(color: Colors.white)),
                   if (isStream) ...[
-                    IconButton(
-                      icon: const Icon(Icons.closed_caption, color: Colors.white),
-                      tooltip: 'Subtitles',
-                      onPressed: _showSubtitleDialog,
+                    _FocusIconButton(
+                      icon: Icons.closed_caption,
+                      onTap: _showSubtitleDialog,
                     ),
                     const SizedBox(width: 6),
-                    IconButton(
-                      icon: const Icon(Icons.upload_file, color: Colors.white),
-                      tooltip: 'Upload Subtitle',
-                      onPressed: _uploadSubtitle,
+                    _FocusIconButton(
+                      icon: Icons.upload_file,
+                      onTap: _uploadSubtitle,
                     ),
                     const SizedBox(width: 6),
-                    IconButton(
-                      icon: const Icon(Icons.settings, color: Colors.white),
-                      tooltip: 'Quality',
-                      onPressed: _showQualityDialog,
+                    _FocusIconButton(
+                      icon: Icons.settings,
+                      onTap: _showQualityDialog,
                     ),
                   ],
                 ],
@@ -832,83 +900,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     );
   }
 
-  void _showSubtitleDialog() {
-    final opts = _subtitleOptions;
-    if (opts.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No subtitles available')),
-      );
-      return;
-    }
-    showDialog<void>(
-      context: context,
-      builder: (ctx) => SimpleDialog(
-        backgroundColor: AppColors.charcoalLight,
-        title: const Text('Subtitles',
-            style: TextStyle(color: AppColors.textPrimary)),
-        children: [
-          _dialogOption(ctx, 'Off', _currentSubUri == null,
-              () => _selectSubtitle(null)),
-          for (final o in opts)
-            _dialogOption(ctx, o.label, _currentSubUri == o.uri,
-                () => _selectSubtitle(o)),
-        ],
-      ),
-    );
-  }
-
-  void _showQualityDialog() {
-    final tracks = _qualityTracks;
-    if (tracks.length <= 1) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Only one quality available')),
-      );
-      return;
-    }
-    final currentId = _player.state.track.video.id;
-    final isAuto = currentId == 'auto';
-    showDialog<void>(
-      context: context,
-      builder: (ctx) => SimpleDialog(
-        backgroundColor: AppColors.charcoalLight,
-        title: const Text('Quality',
-            style: TextStyle(color: AppColors.textPrimary)),
-        children: [
-          _dialogOption(ctx, 'Auto', isAuto,
-              () => _player.setVideoTrack(VideoTrack.auto())),
-          for (final t in tracks)
-            _dialogOption(ctx, '${t.h}p', !isAuto && currentId == t.id,
-                () => _player.setVideoTrack(t)),
-        ],
-      ),
-    );
-  }
-
-  Widget _dialogOption(
-    BuildContext ctx,
-    String label,
-    bool selected,
-    VoidCallback onTap,
-  ) {
-    return SimpleDialogOption(
-      onPressed: () {
-        onTap();
-        Navigator.pop(ctx);
-      },
-      child: Row(
-        children: [
-          Icon(
-            selected ? Icons.radio_button_checked : Icons.radio_button_off,
-            color: selected ? AppColors.textPrimary : AppColors.textSecondary,
-            size: 18,
-          ),
-          const SizedBox(width: 12),
-          Text(label, style: const TextStyle(color: AppColors.textPrimary)),
-        ],
-      ),
-    );
-  }
-
   String _fmt(Duration d) {
     final h = d.inHours;
     final m = d.inMinutes % 60;
@@ -919,11 +910,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 }
 
-class _ControlButton extends StatelessWidget {
-  const _ControlButton({
+/// Icon button with a clear focus ring for D-pad navigation.
+class _FocusIconButton extends StatefulWidget {
+  const _FocusIconButton({
     required this.icon,
     required this.onTap,
-    this.size = 44,
+    this.size = 40,
     this.autofocus = false,
   });
   final IconData icon;
@@ -932,15 +924,42 @@ class _ControlButton extends StatelessWidget {
   final bool autofocus;
 
   @override
+  State<_FocusIconButton> createState() => _FocusIconButtonState();
+}
+
+class _FocusIconButtonState extends State<_FocusIconButton> {
+  bool _focused = false;
+
+  @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      child: IconButton(
-        autofocus: autofocus,
-        iconSize: size,
-        color: Colors.white,
-        icon: Icon(icon),
-        onPressed: onTap,
+    return FocusableActionDetector(
+      autofocus: widget.autofocus,
+      onFocusChange: (f) => setState(() => _focused = f),
+      mouseCursor: SystemMouseCursors.click,
+      actions: {
+        ActivateIntent: CallbackAction<ActivateIntent>(
+          onInvoke: (_) {
+            widget.onTap();
+            return null;
+          },
+        ),
+      },
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: _focused ? Colors.white24 : Colors.transparent,
+            border: Border.all(
+              color: _focused ? Colors.white : Colors.transparent,
+              width: 2,
+            ),
+          ),
+          child: Icon(widget.icon, color: Colors.white, size: widget.size * 0.7),
+        ),
       ),
     );
   }
