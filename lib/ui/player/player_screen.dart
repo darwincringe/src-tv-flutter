@@ -114,13 +114,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           showControls: false,
         ),
         subtitlesConfiguration: const BetterPlayerSubtitlesConfiguration(
-          fontSize: 20,
+          fontSize: 30,
           fontColor: Colors.white,
           outlineEnabled: true,
           outlineColor: Colors.black,
-          outlineSize: 2.5,
-          backgroundColor: Colors.transparent,
-          bottomPadding: 24,
+          outlineSize: 3,
+          backgroundColor: Color(0x00000000),
+          bottomPadding: 40,
         ),
         eventListener: _onEvent,
       ),
@@ -131,11 +131,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     switch (event.betterPlayerEventType) {
       case BetterPlayerEventType.initialized:
         if (_resumeTargetMs > 0) {
-          _controller?.seekTo(Duration(milliseconds: _resumeTargetMs));
+          final target = _resumeTargetMs;
           _resumeTargetMs = 0;
+          _controller?.seekTo(Duration(milliseconds: target));
         }
         _resumeDone = true;
         _retryCount = 0;
+        // ExoPlayer can stall after a seek-on-init (playWhenReady true but not
+        // advancing); nudge it to actually start.
+        _controller?.play();
         if (mounted) setState(() => _loading = false);
         _startTick();
         break;
@@ -587,6 +591,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (target < 0) target = 0;
     if (dur > 0 && target > dur) target = dur;
     _controller?.seekTo(Duration(milliseconds: target));
+    _controller?.play(); // avoid post-seek stall
   }
 
   void _togglePlay() {
@@ -857,6 +862,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                       onChanged: (v) => setState(() => _dragValue = v),
                       onChangeEnd: (v) {
                         _controller?.seekTo(Duration(milliseconds: v.toInt()));
+                        _controller?.play(); // avoid post-seek stall
                         setState(() => _dragValue = null);
                       },
                     ),
