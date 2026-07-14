@@ -82,7 +82,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   bool _showNextOverlay = false;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
-  double? _dragValue;
+
+  // TV / D-pad control state
+  final FocusNode _playPauseFocus = FocusNode(debugLabel: 'playpause');
+  final FocusNode _seekFocus = FocusNode(debugLabel: 'seek');
+  bool _scrubbing = false; // seek-bar "scrub mode" active
+  String? _subtitleText; // current subtitle, rendered by our own overlay
 
   int get _now => DateTime.now().millisecondsSinceEpoch;
 
@@ -115,14 +120,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         controlsConfiguration: const BetterPlayerControlsConfiguration(
           showControls: false,
         ),
+        // better_player's caption renderer can't do bold + soft shadow, so we
+        // hide it (transparent) and draw our own Netflix-style subtitle overlay.
         subtitlesConfiguration: const BetterPlayerSubtitlesConfiguration(
-          fontSize: 40,
-          fontColor: Colors.white,
-          outlineEnabled: true,
-          outlineColor: Colors.black,
-          outlineSize: 3.5,
+          fontSize: 1,
+          fontColor: Color(0x00000000),
+          outlineEnabled: false,
           backgroundColor: Color(0x00000000),
-          bottomPadding: 48,
         ),
         eventListener: _onEvent,
       ),
@@ -560,10 +564,31 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         _controller?.play();
       }
       _updateNextOverlay();
+      final sub = _currentSubtitleText();
+      final subChanged = sub != _subtitleText;
+      if (subChanged) _subtitleText = sub;
       _ticks++;
       if (_ticks % 60 == 0) _saveProgress(); // every 30s
-      if (mounted && _showControls && _dragValue == null) setState(() {});
+      if (mounted && (_showControls || subChanged)) {
+        setState(() {});
+      }
     });
+  }
+
+  /// Current subtitle text for the active source, computed from the parsed
+  /// lines + position (we render it ourselves for a bold/shadow Netflix look).
+  String? _currentSubtitleText() {
+    final lines = _controller?.subtitlesLines ?? [];
+    if (lines.isEmpty) return null;
+    final pos = _position;
+    for (final l in lines) {
+      final start = l.start, end = l.end;
+      if (start != null && end != null && pos >= start && pos <= end) {
+        final t = (l.texts ?? []).join('\n').trim();
+        return t.isEmpty ? null : t;
+      }
+    }
+    return null;
   }
 
   void _updateNextOverlay() {
@@ -656,11 +681,27 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }
   }
 
-  void _revealControls() {
+  void _revealControls({bool focusPlay = false}) {
+    final wasHidden = !_showControls;
     setState(() => _showControls = true);
+    _restartHideTimer();
+    if (focusPlay || wasHidden) {
+      // Auto-focus the play/pause control whenever the controls appear so a
+      // D-pad/remote user always lands somewhere visible.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _playPauseFocus.canRequestFocus) {
+          _playPauseFocus.requestFocus();
+        }
+      });
+    }
+  }
+
+  void _restartHideTimer() {
     _hideTimer?.cancel();
-    _hideTimer = Timer(const Duration(seconds: 4), () {
-      if (mounted && _playing) setState(() => _showControls = false);
+    _hideTimer = Timer(const Duration(seconds: 5), () {
+      if (mounted && _playing && !_scrubbing) {
+        setState(() => _showControls = false);
+      }
     });
   }
 
@@ -720,6 +761,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _hideTimer?.cancel();
     _saveProgress();
     _controller?.dispose();
+    _playPauseFocus.dispose();
+    _seekFocus.dispose();
     WakelockPlus.disable();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
@@ -742,8 +785,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         body: Focus(
           autofocus: true,
           onKeyEvent: (node, event) {
-            if (event is KeyDownEvent) _revealControls();
-            return KeyEventResult.ignored;
+            if (event is! KeyDownEvent) return KeyEventResult.ignored;
+            if (!_showControls) {
+              // First press just reveals the controls and focuses play/pause —
+              // it does not activate anything.
+              _revealControls();
+              return KeyEventResult.handled;
+            }
+            _restartHideTimer();
+            return KeyEventResult.ignored; // let the focused control handle it
           },
           child: GestureDetector(
             onTap: () {
@@ -758,6 +808,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
               children: [
                 if (_controller != null)
                   BetterPlayer(controller: _controller!),
+                _subtitleOverlay(),
                 if (_loading)
                   const Center(
                     child: CircularProgressIndicator(color: Colors.white),
@@ -768,6 +819,32 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   _nextEpisodeOverlay(),
               ],
             ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _subtitleOverlay() {
+    final text = _subtitleText;
+    if (text == null || text.isEmpty) return const SizedBox.shrink();
+    return Positioned(
+      left: 24,
+      right: 24,
+      bottom: _showControls ? 150 : 56,
+      child: IgnorePointer(
+        child: Text(
+          text,
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 36,
+            fontWeight: FontWeight.w700,
+            height: 1.25,
+            shadows: [
+              Shadow(offset: Offset(0, 2), blurRadius: 6, color: Color(0xE6000000)),
+              Shadow(blurRadius: 12, color: Color(0xB3000000)),
+            ],
           ),
         ),
       ),
@@ -827,8 +904,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   Widget _controlsOverlay() {
-    final dur = _duration.inMilliseconds.toDouble();
-    final pos = _position.inMilliseconds.clamp(0, dur.toInt()).toDouble();
     final isStream = _mode == PlayerMode.stream;
     return Container(
       decoration: BoxDecoration(
@@ -880,7 +955,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
               _FocusIconButton(
                 icon: _playing ? Icons.pause_circle : Icons.play_circle,
                 size: 64,
-                autofocus: true,
+                focusNode: _playPauseFocus,
                 onTap: _togglePlay,
               ),
               _FocusIconButton(
@@ -901,26 +976,32 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
               child: Row(
                 children: [
                   Text(
-                    _fmt(_dragValue != null
-                        ? Duration(milliseconds: _dragValue!.toInt())
-                        : _position),
+                    _fmt(_position),
                     style: const TextStyle(color: Colors.white),
                   ),
+                  const SizedBox(width: 12),
                   Expanded(
-                    child: Slider(
-                      value: _dragValue ?? (dur > 0 ? pos : 0),
-                      max: dur > 0 ? dur : 1,
-                      activeColor: Colors.white,
-                      inactiveColor: Colors.white24,
-                      onChangeStart: (_) => _revealControls(),
-                      onChanged: (v) => setState(() => _dragValue = v),
-                      onChangeEnd: (v) {
-                        _controller?.seekTo(Duration(milliseconds: v.toInt()));
-                        _controller?.play(); // avoid post-seek stall
-                        setState(() => _dragValue = null);
+                    child: _SeekBar(
+                      position: _position,
+                      duration: _duration,
+                      focusNode: _seekFocus,
+                      scrubbing: _scrubbing,
+                      onScrubChanged: (v) {
+                        setState(() => _scrubbing = v);
+                        _restartHideTimer();
+                      },
+                      onSeekStep: (delta) {
+                        _seekBy(delta);
+                        _restartHideTimer();
+                      },
+                      onSeekTo: (p) {
+                        _controller?.seekTo(p);
+                        _controller?.play();
+                        _restartHideTimer();
                       },
                     ),
                   ),
+                  const SizedBox(width: 12),
                   Text(_fmt(_duration),
                       style: const TextStyle(color: Colors.white)),
                   if (isStream) ...[
@@ -976,12 +1057,12 @@ class _FocusIconButton extends StatefulWidget {
     required this.icon,
     required this.onTap,
     this.size = 40,
-    this.autofocus = false,
+    this.focusNode,
   });
   final IconData icon;
   final VoidCallback onTap;
   final double size;
-  final bool autofocus;
+  final FocusNode? focusNode;
 
   @override
   State<_FocusIconButton> createState() => _FocusIconButtonState();
@@ -993,7 +1074,7 @@ class _FocusIconButtonState extends State<_FocusIconButton> {
   @override
   Widget build(BuildContext context) {
     return FocusableActionDetector(
-      autofocus: widget.autofocus,
+      focusNode: widget.focusNode,
       onFocusChange: (f) => setState(() => _focused = f),
       mouseCursor: SystemMouseCursors.click,
       actions: {
@@ -1019,6 +1100,148 @@ class _FocusIconButtonState extends State<_FocusIconButton> {
             ),
           ),
           child: Icon(widget.icon, color: Colors.white, size: widget.size * 0.7),
+        ),
+      ),
+    );
+  }
+}
+
+/// D-pad friendly seek bar. When focused, arrows move to adjacent controls;
+/// pressing Select/Enter enters "scrub mode" where Left/Right seek by 30s and
+/// Up/Down (or Select again) exits. Touch: tap anywhere on the bar to seek.
+class _SeekBar extends StatefulWidget {
+  const _SeekBar({
+    required this.position,
+    required this.duration,
+    required this.focusNode,
+    required this.scrubbing,
+    required this.onScrubChanged,
+    required this.onSeekStep,
+    required this.onSeekTo,
+  });
+
+  final Duration position;
+  final Duration duration;
+  final FocusNode focusNode;
+  final bool scrubbing;
+  final ValueChanged<bool> onScrubChanged;
+  final void Function(int deltaMs) onSeekStep;
+  final void Function(Duration pos) onSeekTo;
+
+  @override
+  State<_SeekBar> createState() => _SeekBarState();
+}
+
+class _SeekBarState extends State<_SeekBar> {
+  bool _focused = false;
+
+  static final _selectKeys = {
+    LogicalKeyboardKey.enter,
+    LogicalKeyboardKey.numpadEnter,
+    LogicalKeyboardKey.space,
+    LogicalKeyboardKey.select,
+    LogicalKeyboardKey.gameButtonA,
+  };
+
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    final k = event.logicalKey;
+    if (_selectKeys.contains(k)) {
+      widget.onScrubChanged(!widget.scrubbing);
+      return KeyEventResult.handled;
+    }
+    if (widget.scrubbing) {
+      if (k == LogicalKeyboardKey.arrowLeft) {
+        widget.onSeekStep(-30000);
+        return KeyEventResult.handled;
+      }
+      if (k == LogicalKeyboardKey.arrowRight) {
+        widget.onSeekStep(30000);
+        return KeyEventResult.handled;
+      }
+      if (k == LogicalKeyboardKey.arrowUp ||
+          k == LogicalKeyboardKey.arrowDown ||
+          k == LogicalKeyboardKey.goBack ||
+          k == LogicalKeyboardKey.escape) {
+        // Exit scrub mode and let the arrow also move focus away.
+        widget.onScrubChanged(false);
+        return KeyEventResult.ignored;
+      }
+      return KeyEventResult.handled;
+    }
+    // Not scrubbing: arrows fall through to move focus to other controls.
+    return KeyEventResult.ignored;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final durMs = widget.duration.inMilliseconds;
+    final frac =
+        durMs > 0 ? (widget.position.inMilliseconds / durMs).clamp(0.0, 1.0) : 0.0;
+    final active = _focused || widget.scrubbing;
+    final barHeight = active ? 6.0 : 3.0;
+    final accent = widget.scrubbing ? AppColors.ratingYellow : Colors.white;
+
+    return Focus(
+      focusNode: widget.focusNode,
+      onKeyEvent: _onKey,
+      onFocusChange: (f) => setState(() => _focused = f),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: (d) {
+          if (durMs <= 0) return;
+          final box = context.findRenderObject() as RenderBox?;
+          if (box == null) return;
+          final frac = (d.localPosition.dx / box.size.width).clamp(0.0, 1.0);
+          widget.focusNode.requestFocus();
+          widget.onSeekTo(Duration(milliseconds: (frac * durMs).round()));
+        },
+        child: SizedBox(
+          height: 36,
+          child: LayoutBuilder(
+            builder: (context, c) {
+              final w = c.maxWidth;
+              return Stack(
+                alignment: Alignment.centerLeft,
+                clipBehavior: Clip.none,
+                children: [
+                  Container(
+                    height: barHeight,
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                  ),
+                  Container(
+                    width: w * frac,
+                    height: barHeight,
+                    decoration: BoxDecoration(
+                      color: accent,
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                  ),
+                  if (active)
+                    Positioned(
+                      left: (w * frac) - 9,
+                      child: Container(
+                        width: 18,
+                        height: 18,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: accent,
+                          boxShadow: [
+                            BoxShadow(
+                              color: accent.withValues(alpha: 0.5),
+                              blurRadius: 8,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                ],
+              );
+            },
+          ),
         ),
       ),
     );
