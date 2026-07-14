@@ -24,8 +24,8 @@ class HeroBackdrop extends StatelessWidget {
               Positioned(
                 top: 0,
                 right: 0,
-                width: constraints.maxWidth * 0.72,
-                height: constraints.maxHeight * 0.62,
+                width: constraints.maxWidth * 0.80,
+                height: constraints.maxHeight * 0.72,
                 child: AnimatedSwitcher(
                   duration: const Duration(milliseconds: 300),
                   child: CachedNetworkImage(
@@ -36,7 +36,8 @@ class HeroBackdrop extends StatelessWidget {
                   ),
                 ),
               ),
-            // Horizontal fade: Charcoal → transparent across 0..0.4
+            // Horizontal fade: Charcoal on the left → transparent, so the
+            // image's left edge dissolves behind the title/description.
             const Positioned.fill(
               child: DecoratedBox(
                 decoration: BoxDecoration(
@@ -44,12 +45,13 @@ class HeroBackdrop extends StatelessWidget {
                     begin: Alignment.centerLeft,
                     end: Alignment.centerRight,
                     colors: [AppColors.charcoal, Color(0x00161616)],
-                    stops: [0.0, 0.4],
+                    stops: [0.30, 0.62],
                   ),
                 ),
               ),
             ),
-            // Vertical fade: transparent → Charcoal across 0.5..1
+            // Vertical fade: transparent → Charcoal so the image's bottom edge
+            // dissolves into the rows below.
             const Positioned.fill(
               child: DecoratedBox(
                 decoration: BoxDecoration(
@@ -57,7 +59,7 @@ class HeroBackdrop extends StatelessWidget {
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
                     colors: [Color(0x00161616), AppColors.charcoal],
-                    stops: [0.5, 1.0],
+                    stops: [0.42, 0.72],
                   ),
                 ),
               ),
@@ -81,14 +83,14 @@ class HeroInfo extends StatelessWidget {
     final it = item;
     if (it == null) return const SizedBox.shrink();
     return Padding(
-      padding: EdgeInsets.only(left: 40, top: 36, right: portrait ? 40 : 0),
+      padding: EdgeInsets.only(left: 40, top: 40, right: portrait ? 40 : 0),
       child: Align(
-        alignment: Alignment.bottomLeft,
+        alignment: Alignment.topLeft,
         child: FractionallySizedBox(
           widthFactor: portrait ? 1 : 0.48,
-          alignment: Alignment.centerLeft,
+          alignment: Alignment.topLeft,
           child: Column(
-            mainAxisAlignment: MainAxisAlignment.end,
+            mainAxisAlignment: MainAxisAlignment.start,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
