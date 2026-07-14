@@ -321,13 +321,14 @@ class MediaRepository {
         WatchProgressStore.all().where((p) => p.isContinuable).toList();
     final out = <WatchProgress>[];
     for (final p in progs) {
-      if (p.title != null &&
-          p.title!.isNotEmpty &&
-          p.posterPath != null &&
-          p.posterPath!.isNotEmpty) {
+      final hasInfo = (p.title?.isNotEmpty ?? false) &&
+          (p.posterPath?.isNotEmpty ?? false);
+      if (hasInfo) {
         out.add(p);
         continue;
       }
+      // Enrich missing title/poster from details, but never drop a continuable
+      // entry just because the details fetch failed.
       try {
         final d = await details(p.type, p.tmdbId);
         out.add(p.copyWith(
@@ -336,7 +337,7 @@ class MediaRepository {
               (p.posterPath?.isNotEmpty ?? false) ? p.posterPath : d.posterPath,
         ));
       } catch (_) {
-        // drop unresolvable
+        out.add(p);
       }
     }
     return out;

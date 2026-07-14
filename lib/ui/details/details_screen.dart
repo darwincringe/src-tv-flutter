@@ -336,25 +336,24 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
               ),
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 40),
-            child: Center(
-              child: Wrap(
-                spacing: 10,
-                runSpacing: 10,
-                alignment: WrapAlignment.center,
-                children: [
-                  for (final s in d.seasons)
-                    _SeasonPill(
-                      label: s.name ?? 'Season ${s.seasonNumber}',
-                      selected: s.seasonNumber == _selectedSeason,
-                      onTap: () {
-                        setState(() => _selectedSeason = s.seasonNumber);
-                        _loadEpisodes(s.seasonNumber);
-                      },
-                    ),
-                ],
-              ),
+          SizedBox(
+            height: 44,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 40),
+              itemCount: d.seasons.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 10),
+              itemBuilder: (context, i) {
+                final s = d.seasons[i];
+                return _SeasonPill(
+                  label: s.name ?? 'Season ${s.seasonNumber}',
+                  selected: s.seasonNumber == _selectedSeason,
+                  onTap: () {
+                    setState(() => _selectedSeason = s.seasonNumber);
+                    _loadEpisodes(s.seasonNumber);
+                  },
+                );
+              },
             ),
           ),
           const SizedBox(height: 16),

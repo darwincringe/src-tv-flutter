@@ -71,6 +71,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   final List<String> _uploadedSubs = [];
   String? _currentSubUri; // null == off
   int _retryCount = 0;
+  int _resumeTargetMs = 0;
+  bool _resumeDone = true;
 
   // UI state
   bool _loading = true;
@@ -80,6 +82,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   bool _showNextOverlay = false;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
+  double? _dragValue; // slider value while actively scrubbing
 
   int get _now => DateTime.now().millisecondsSinceEpoch;
 
@@ -112,6 +115,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   void _wireStreams() {
     _subs.add(_player.stream.position.listen((p) {
       _position = p;
+      _applyResumeSeek(p);
       _updateNextOverlay();
       // Only repaint the overlay when it's visible; avoids rebuilding the whole
       // player tree several times a second during playback (reduces stutter).
@@ -138,15 +142,17 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }));
   }
 
-  /// Waits until the media reports a real duration (loaded), so a resume seek
-  /// lands correctly. Times out gracefully.
-  Future<void> _waitForDuration() async {
-    if (_player.state.duration.inMilliseconds > 0) return;
-    try {
-      await _player.stream.duration
-          .firstWhere((d) => d.inMilliseconds > 0)
-          .timeout(const Duration(seconds: 12));
-    } catch (_) {}
+  /// Applies the one-shot resume seek once playback has genuinely started
+  /// (position advancing and duration known). Seeking earlier makes the media
+  /// snap back to 0.
+  void _applyResumeSeek(Duration p) {
+    if (_resumeDone || _resumeTargetMs <= 0) return;
+    if (_duration.inMilliseconds > 0 && p.inMilliseconds >= 500) {
+      _resumeDone = true;
+      final target = _resumeTargetMs;
+      _resumeTargetMs = 0;
+      _player.seek(Duration(milliseconds: target));
+    }
   }
 
   // ---- Resolve + play ----------------------------------------------------
@@ -219,19 +225,16 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       }
       _computeEpisodeRefs();
       final resumeMs = _savedResumePosition();
+      _resumeTargetMs = resumeMs;
+      _resumeDone = resumeMs <= 0;
 
-      // Open paused, seek to the resume point once the media is loaded, then
-      // play. Seeking before playback starts avoids the "jumps to the right
-      // spot then snaps back to 0" race.
+      // Play from the start, then jump to the saved position once real playback
+      // has begun (see _applyResumeSeek). Seeking before the media is fully
+      // loaded makes it snap back to 0.
       await _player.open(
         Media(_hlsUrl!, httpHeaders: {'User-Agent': _userAgent}),
-        play: false,
+        play: true,
       );
-      if (resumeMs > 0) {
-        await _waitForDuration();
-        await _player.seek(Duration(milliseconds: resumeMs));
-      }
-      await _player.play();
       _applyDefaultSubtitle();
       _startSaveLoop();
       if (mounted) {
@@ -420,6 +423,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   void _saveProgress() {
     if (_mode != PlayerMode.stream) return;
+    // Don't overwrite the saved position before the resume seek has applied.
+    if (!_resumeDone) return;
     final pos = _player.state.position.inMilliseconds;
     final dur = _player.state.duration.inMilliseconds;
     if (dur <= 0) return;
@@ -765,17 +770,23 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
               child: Row(
                 children: [
-                  Text(_fmt(_position),
-                      style: const TextStyle(color: Colors.white)),
+                  Text(
+                    _fmt(_dragValue != null
+                        ? Duration(milliseconds: _dragValue!.toInt())
+                        : _position),
+                    style: const TextStyle(color: Colors.white),
+                  ),
                   Expanded(
                     child: Slider(
-                      value: dur > 0 ? pos : 0,
+                      value: _dragValue ?? (dur > 0 ? pos : 0),
                       max: dur > 0 ? dur : 1,
                       activeColor: Colors.white,
                       inactiveColor: Colors.white24,
-                      onChanged: (v) {
-                        _revealControls();
+                      onChangeStart: (_) => _revealControls(),
+                      onChanged: (v) => setState(() => _dragValue = v),
+                      onChangeEnd: (v) {
                         _player.seek(Duration(milliseconds: v.toInt()));
+                        setState(() => _dragValue = null);
                       },
                     ),
                   ),
