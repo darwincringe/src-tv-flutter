@@ -40,10 +40,12 @@ class CategoryRowSection extends StatelessWidget {
           ),
         ),
         SizedBox(
-          height: 190,
+          height: 196,
           child: ListView.separated(
             scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 40),
+            // Don't clip the focus scale-up of the poster cards.
+            clipBehavior: Clip.none,
+            padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 6),
             itemCount: row.items.length,
             separatorBuilder: (_, _) => const SizedBox(width: 14),
             itemBuilder: (context, index) {

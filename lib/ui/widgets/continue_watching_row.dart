@@ -55,10 +55,12 @@ class _ContinueWatchingRowState extends State<ContinueWatchingRow> {
           ),
         ),
         SizedBox(
-          height: 240,
+          height: 248,
           child: ListView.separated(
             scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 40),
+            // Don't clip the focus scale-up of the cards.
+            clipBehavior: Clip.none,
+            padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 6),
             itemCount: shown + (hasMore ? 1 : 0),
             separatorBuilder: (_, _) => const SizedBox(width: 14),
             itemBuilder: (context, index) {

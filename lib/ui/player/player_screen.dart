@@ -1066,6 +1066,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                 icon: _playing ? Icons.pause_circle : Icons.play_circle,
                 size: 64,
                 focusNode: _playPauseFocus,
+                autofocus: true, // land focus here whenever controls appear
                 onTap: _togglePlay,
               ),
               _FocusIconButton(
@@ -1172,11 +1173,13 @@ class _FocusIconButton extends StatefulWidget {
     required this.onTap,
     this.size = 40,
     this.focusNode,
+    this.autofocus = false,
   });
   final IconData icon;
   final VoidCallback onTap;
   final double size;
   final FocusNode? focusNode;
+  final bool autofocus;
 
   @override
   State<_FocusIconButton> createState() => _FocusIconButtonState();
@@ -1189,6 +1192,7 @@ class _FocusIconButtonState extends State<_FocusIconButton> {
   Widget build(BuildContext context) {
     return FocusableActionDetector(
       focusNode: widget.focusNode,
+      autofocus: widget.autofocus,
       onFocusChange: (f) => setState(() => _focused = f),
       mouseCursor: SystemMouseCursors.click,
       actions: {
