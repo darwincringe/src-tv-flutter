@@ -35,6 +35,14 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- Use the Skia renderer instead of Impeller. Impeller misrenders and
+             stalls on software/emulated GL (e.g. Windows Subsystem for Android
+             and some emulators): gradients don't paint and frames only repaint
+             on input. Skia is robust everywhere. Remove this to use Impeller on
+             real hardware. -->
+        <meta-data
+            android:name="io.flutter.embedding.android.EnableImpeller"
+            android:value="false" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
