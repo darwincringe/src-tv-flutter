@@ -87,7 +87,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   final FocusNode _playPauseFocus = FocusNode(debugLabel: 'playpause');
   final FocusNode _seekFocus = FocusNode(debugLabel: 'seek');
   bool _scrubbing = false; // seek-bar "scrub mode" active
-  int _scrubStartMs = 0; // position when scrub began (for cancel)
+  int _scrubPreviewMs = 0; // marker position while scrubbing (not yet applied)
   bool _wasPlayingBeforeScrub = false;
   String? _subtitleText; // current subtitle, rendered by our own overlay
 
@@ -686,33 +686,36 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   // ---- Scrub mode (seek bar) ---------------------------------------------
 
   void _enterScrub() {
-    _scrubStartMs = _position.inMilliseconds;
+    _scrubPreviewMs = _position.inMilliseconds;
     _wasPlayingBeforeScrub = _playing;
     _controller?.pause(); // pause while scrubbing
     setState(() => _scrubbing = true);
     _restartHideTimer();
   }
 
-  void _scrubSeek(int deltaMs) {
+  // Only moves the marker — does NOT seek the video, so holding slides smoothly
+  // without the stream re-buffering at every step.
+  void _scrubStep(int deltaMs) {
     final dur = _duration.inMilliseconds;
-    var t = _position.inMilliseconds + deltaMs;
+    var t = _scrubPreviewMs + deltaMs;
     if (t < 0) t = 0;
     if (dur > 0 && t > dur) t = dur;
-    _controller?.seekTo(Duration(milliseconds: t)); // paused preview frame
+    setState(() => _scrubPreviewMs = t);
     _restartHideTimer();
   }
 
-  // Confirm the scrub: keep the new position, stay paused, focus play/pause so
-  // the user can press play to resume.
+  // Confirm: now actually seek to the marker (one load), stay paused, and focus
+  // play/pause so the user presses play to resume.
   void _commitScrub() {
+    _controller?.seekTo(Duration(milliseconds: _scrubPreviewMs));
     setState(() => _scrubbing = false);
     _playPauseFocus.requestFocus();
     _restartHideTimer();
   }
 
-  // Cancel (Back): return to where scrubbing started and restore playback.
+  // Cancel (Back): discard the marker; nothing was seeked, so just restore
+  // playback where it was.
   void _cancelScrub() {
-    _controller?.seekTo(Duration(milliseconds: _scrubStartMs));
     if (_wasPlayingBeforeScrub) _controller?.play();
     setState(() => _scrubbing = false);
     _playPauseFocus.requestFocus();
@@ -870,28 +873,72 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   Widget _subtitleOverlay() {
     final text = _subtitleText;
     if (text == null || text.isEmpty) return const SizedBox.shrink();
+    const baseStyle = TextStyle(
+      color: Colors.white,
+      fontSize: 46,
+      fontWeight: FontWeight.w700,
+      height: 1.25,
+      shadows: [
+        Shadow(offset: Offset(0, 2), blurRadius: 7, color: Color(0xF2000000)),
+        Shadow(blurRadius: 14, color: Color(0xB3000000)),
+      ],
+    );
     return Positioned(
       left: 24,
       right: 24,
       bottom: _showControls ? 150 : 56,
       child: IgnorePointer(
-        child: Text(
-          text,
+        child: Text.rich(
+          _subtitleSpan(text, baseStyle),
           textAlign: TextAlign.center,
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 36,
-            fontWeight: FontWeight.w700,
-            height: 1.25,
-            shadows: [
-              Shadow(offset: Offset(0, 2), blurRadius: 6, color: Color(0xE6000000)),
-              Shadow(blurRadius: 12, color: Color(0xB3000000)),
-            ],
-          ),
+          style: baseStyle,
         ),
       ),
     );
   }
+
+  /// Parses subtitle markup: renders <i>/<b> as italic/bold, strips other tags,
+  /// and decodes common HTML entities.
+  TextSpan _subtitleSpan(String raw, TextStyle base) {
+    final children = <TextSpan>[];
+    var italic = false;
+    var bold = false;
+    final re = RegExp(r'(<[^>]+>)|([^<]+)');
+    for (final m in re.allMatches(raw)) {
+      final tag = m.group(1);
+      final txt = m.group(2);
+      if (tag != null) {
+        final t = tag.toLowerCase().replaceAll(' ', '');
+        if (t == '<i>') {
+          italic = true;
+        } else if (t == '</i>') {
+          italic = false;
+        } else if (t == '<b>') {
+          bold = true;
+        } else if (t == '</b>') {
+          bold = false;
+        }
+        // other tags (e.g. <font>, <u>) are stripped
+      } else if (txt != null) {
+        children.add(TextSpan(
+          text: _decodeEntities(txt),
+          style: TextStyle(
+            fontStyle: italic ? FontStyle.italic : FontStyle.normal,
+            fontWeight: bold ? FontWeight.w800 : base.fontWeight,
+          ),
+        ));
+      }
+    }
+    return TextSpan(children: children);
+  }
+
+  String _decodeEntities(String s) => s
+      .replaceAll('&amp;', '&')
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&quot;', '"')
+      .replaceAll('&#39;', "'")
+      .replaceAll('&apos;', "'");
 
   Widget _errorView() {
     final isTrailer = _mode == PlayerMode.trailer;
@@ -1015,23 +1062,27 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           SafeArea(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-              child: Row(
+              child: Builder(builder: (context) {
+                final displayPos = _scrubbing
+                    ? Duration(milliseconds: _scrubPreviewMs)
+                    : _position;
+                return Row(
                 children: [
                   Text(
-                    _fmt(_position),
+                    _fmt(displayPos),
                     style: const TextStyle(color: Colors.white),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
                     child: _SeekBar(
-                      position: _position,
+                      position: displayPos,
                       duration: _duration,
                       focusNode: _seekFocus,
                       scrubbing: _scrubbing,
                       onEnterScrub: _enterScrub,
                       onCommitScrub: _commitScrub,
                       onCancelScrub: _cancelScrub,
-                      onSeekStep: _scrubSeek,
+                      onSeekStep: _scrubStep,
                       onSeekTo: (p) {
                         _controller?.seekTo(p);
                         _controller?.play();
@@ -1059,7 +1110,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                     ),
                   ],
                 ],
-              ),
+                );
+              }),
             ),
           ),
         ],
