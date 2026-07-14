@@ -455,10 +455,12 @@ class _DetailsBackdrop extends StatelessWidget {
             Positioned(
               top: 0,
               right: 0,
-              width: c.maxWidth * 0.72,
-              height: c.maxHeight * 0.7,
+              width: c.maxWidth * 0.80,
+              height: c.maxHeight * 0.75,
               child: CachedNetworkImage(imageUrl: url, fit: BoxFit.cover),
             ),
+          // Horizontal fade: charcoal on the left → transparent, so the
+          // image's left edge dissolves behind the title/overview.
           const Positioned.fill(
             child: DecoratedBox(
               decoration: BoxDecoration(
@@ -466,11 +468,13 @@ class _DetailsBackdrop extends StatelessWidget {
                   begin: Alignment.centerLeft,
                   end: Alignment.centerRight,
                   colors: [AppColors.charcoal, Color(0x00161616)],
-                  stops: [0.0, 0.45],
+                  stops: [0.32, 0.66],
                 ),
               ),
             ),
           ),
+          // Vertical fade: transparent → charcoal so the bottom edge dissolves
+          // into the cast / more-like-this sections.
           const Positioned.fill(
             child: DecoratedBox(
               decoration: BoxDecoration(
@@ -478,7 +482,7 @@ class _DetailsBackdrop extends StatelessWidget {
                   begin: Alignment.topCenter,
                   end: Alignment.bottomCenter,
                   colors: [Color(0x00161616), AppColors.charcoal],
-                  stops: [0.45, 1.0],
+                  stops: [0.42, 0.75],
                 ),
               ),
             ),
