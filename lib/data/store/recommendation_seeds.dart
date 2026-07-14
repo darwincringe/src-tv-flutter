@@ -7,6 +7,11 @@ class Seed {
   final String type;
   final int id;
   const Seed(this.type, this.id);
+
+  Map<String, dynamic> toJson() => {'type': type, 'id': id};
+
+  factory Seed.fromJson(Map<String, dynamic> j) =>
+      Seed(j['type'] as String, j['id'] as int);
 }
 
 /// Stores up to [max] recent seeds (newest-first) in a single JSON list.
@@ -26,7 +31,7 @@ class RecommendationSeeds {
     final capped = list.take(max).toList();
     _prefs.setString(
       _key,
-      jsonEncode(capped.map((s) => {'type': s.type, 'id': s.id}).toList()),
+      jsonEncode(capped.map((s) => s.toJson()).toList()),
     );
   }
 
@@ -36,7 +41,7 @@ class RecommendationSeeds {
     try {
       final data = jsonDecode(s) as List;
       return data
-          .map((e) => Seed(e['type'] as String, e['id'] as int))
+          .map((e) => Seed.fromJson(e as Map<String, dynamic>))
           .toList();
     } catch (_) {
       return [];

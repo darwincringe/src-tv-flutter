@@ -13,6 +13,7 @@ import '../../core/theme.dart';
 import '../../data/models/details_dto.dart';
 import '../../data/repository/media_repository.dart';
 import '../../data/store/active_playback.dart';
+import '../../data/store/subtitle_pref.dart';
 import '../../data/store/watch_progress.dart';
 import '../../data/tmdb/image_urls.dart';
 import '../../data/youtube/youtube_extractor.dart';
@@ -68,6 +69,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   // Streaming state
   final List<SubtitleOption> _uploadedSubs = [];
+  List<SubtitleOption> _subOptions = []; // all current subtitle options
   int _resumeTargetMs = 0;
   bool _resumeDone = true;
   int _retryCount = 0;
@@ -283,18 +285,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   ) {
     final opts = [
       ...apiSubtitleOptions(apiUrls),
-      for (var i = 0; i < _uploadedSubs.length; i++) _uploadedSubs[i],
+      ..._uploadedSubs,
     ];
-    // Prefer English (case-insensitive) as the default; else the first track.
-    int defaultIndex = opts.indexWhere((o) {
-      final lang = (o.language ?? '').toLowerCase();
-      final label = o.label.toLowerCase();
-      return lang == 'en' ||
-          lang.contains('eng') ||
-          label.contains('eng') ||
-          label.contains('english');
-    });
-    if (defaultIndex < 0 && opts.isNotEmpty) defaultIndex = 0;
+    _subOptions = opts;
+    final defaultIndex = _defaultSubtitleIndex(opts);
 
     return [
       for (var i = 0; i < opts.length; i++)
@@ -307,6 +301,48 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           selectedByDefault: i == defaultIndex,
         ),
     ];
+  }
+
+  /// Chooses the default subtitle: the remembered choice (matched by name, then
+  /// language), else English (case-insensitive), else the first track. Returns
+  /// -1 if the user previously turned subtitles off.
+  int _defaultSubtitleIndex(List<SubtitleOption> opts) {
+    final pref = SubtitlePrefStore.get(_type, _tmdbId, _season);
+    if (pref?.off ?? false) return -1;
+    if (pref != null) {
+      if (pref.name != null) {
+        final i = opts.indexWhere(
+            (o) => o.label.toLowerCase() == pref.name!.toLowerCase());
+        if (i >= 0) return i;
+      }
+      if (pref.language != null) {
+        final i = opts.indexWhere((o) => (o.language ?? '') == pref.language);
+        if (i >= 0) return i;
+      }
+    }
+    final en = opts.indexWhere((o) {
+      final lang = (o.language ?? '').toLowerCase();
+      final label = o.label.toLowerCase();
+      return lang == 'en' ||
+          lang.contains('eng') ||
+          label.contains('eng') ||
+          label.contains('english');
+    });
+    if (en >= 0) return en;
+    return opts.isNotEmpty ? 0 : -1;
+  }
+
+  void _rememberSubtitle(String? name) {
+    final opt = _subOptions.firstWhere(
+      (o) => o.label == name,
+      orElse: () => SubtitleOption(uri: '', label: name ?? ''),
+    );
+    SubtitlePrefStore.save(
+      _type,
+      _tmdbId,
+      _season,
+      SubtitlePref(name: name, language: opt.language),
+    );
   }
 
   Future<void> _uploadSubtitle() async {
@@ -363,11 +399,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                     type: BetterPlayerSubtitlesSourceType.none),
               );
               _controller?.setupSubtitleSource(none);
+              SubtitlePrefStore.save(
+                  _type, _tmdbId, _season, const SubtitlePref(off: true));
             },
           ),
           for (final s in selectable)
-            _dialogOption(ctx, s.name ?? 'Subtitle', current == s,
-                () => _controller?.setupSubtitleSource(s)),
+            _dialogOption(ctx, s.name ?? 'Subtitle', current == s, () {
+              _controller?.setupSubtitleSource(s);
+              _rememberSubtitle(s.name);
+            }),
         ],
       ),
     );
