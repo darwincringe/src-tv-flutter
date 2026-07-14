@@ -345,13 +345,15 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
               separatorBuilder: (_, _) => const SizedBox(width: 10),
               itemBuilder: (context, i) {
                 final s = d.seasons[i];
-                return _SeasonPill(
-                  label: s.name ?? 'Season ${s.seasonNumber}',
-                  selected: s.seasonNumber == _selectedSeason,
-                  onTap: () {
-                    setState(() => _selectedSeason = s.seasonNumber);
-                    _loadEpisodes(s.seasonNumber);
-                  },
+                return Center(
+                  child: _SeasonPill(
+                    label: s.name ?? 'Season ${s.seasonNumber}',
+                    selected: s.seasonNumber == _selectedSeason,
+                    onTap: () {
+                      setState(() => _selectedSeason = s.seasonNumber);
+                      _loadEpisodes(s.seasonNumber);
+                    },
+                  ),
                 );
               },
             ),
@@ -631,6 +633,7 @@ class _SeasonPill extends StatelessWidget {
         ),
         child: Text(
           label,
+          textAlign: TextAlign.center,
           style: TextStyle(
             color: selected ? AppColors.charcoal : AppColors.textSecondary,
             fontWeight: FontWeight.w600,
