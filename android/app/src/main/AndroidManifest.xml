@@ -1,5 +1,4 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
 
     <!-- Install on both phones and TVs. -->
@@ -49,19 +48,6 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
-        <!-- better_player_plus pulls in WorkManager, whose auto-initializer
-             crashes on startup here (WorkDatabase_Impl init). We don't use
-             its background notifications/caching, so remove the auto-init. -->
-        <provider
-            android:name="androidx.startup.InitializationProvider"
-            android:authorities="${applicationId}.androidx-startup"
-            android:exported="false"
-            tools:node="merge">
-            <meta-data
-                android:name="androidx.work.WorkManagerInitializer"
-                android:value="androidx.startup"
-                tools:node="remove" />
-        </provider>
     </application>
     <queries>
         <intent>

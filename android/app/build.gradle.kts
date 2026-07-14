@@ -27,9 +27,14 @@ android {
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            // Disable R8/minification. It strips reflection-accessed classes such
+            // as WorkManager's Room WorkDatabase_Impl constructor (used by
+            // better_player_plus), crashing at startup. The native app also runs
+            // with optimization off; enable + add keep rules before publishing.
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
     }
 }
