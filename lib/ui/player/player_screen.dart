@@ -130,15 +130,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   void _onEvent(BetterPlayerEvent event) {
     switch (event.betterPlayerEventType) {
       case BetterPlayerEventType.initialized:
-        if (_resumeTargetMs > 0) {
-          final target = _resumeTargetMs;
-          _resumeTargetMs = 0;
-          _controller?.seekTo(Duration(milliseconds: target));
-        }
-        _resumeDone = true;
         _retryCount = 0;
-        // ExoPlayer can stall after a seek-on-init (playWhenReady true but not
-        // advancing); nudge it to actually start.
+        // Don't seek here — seeking right after init stalls ExoPlayer. The
+        // resume seek is applied from the tick once playback is advancing.
         _controller?.play();
         if (mounted) setState(() => _loading = false);
         _startTick();
@@ -505,6 +499,18 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       if (v == null || !v.initialized) return;
       _position = v.position;
       _duration = v.duration ?? Duration.zero;
+      // Apply the resume seek only once playback is genuinely advancing;
+      // seeking earlier (on init) stalls ExoPlayer. This is the same path as a
+      // manual seek, which works reliably.
+      if (!_resumeDone &&
+          _resumeTargetMs > 0 &&
+          _position.inMilliseconds >= 800) {
+        final target = _resumeTargetMs;
+        _resumeTargetMs = 0;
+        _resumeDone = true;
+        _controller?.seekTo(Duration(milliseconds: target));
+        _controller?.play();
+      }
       _updateNextOverlay();
       _ticks++;
       if (_ticks % 60 == 0) _saveProgress(); // every 30s
