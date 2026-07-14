@@ -722,6 +722,27 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _restartHideTimer();
   }
 
+  // Touch / mouse drag on the seek bar: preview while dragging, seek once on
+  // release, then resume if it was playing.
+  void _touchScrubStart() {
+    _wasPlayingBeforeScrub = _playing;
+    _controller?.pause();
+    setState(() => _scrubbing = true);
+    _restartHideTimer();
+  }
+
+  void _touchScrubTo(Duration p) {
+    setState(() => _scrubPreviewMs = p.inMilliseconds);
+    _restartHideTimer();
+  }
+
+  void _touchScrubEnd() {
+    _controller?.seekTo(Duration(milliseconds: _scrubPreviewMs));
+    if (_wasPlayingBeforeScrub) _controller?.play();
+    setState(() => _scrubbing = false);
+    _restartHideTimer();
+  }
+
   void _revealControls({bool focusPlay = false}) {
     final wasHidden = !_showControls;
     setState(() => _showControls = true);
@@ -875,18 +896,18 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (text == null || text.isEmpty) return const SizedBox.shrink();
     const baseStyle = TextStyle(
       color: Colors.white,
-      fontSize: 46,
+      fontSize: 50,
       fontWeight: FontWeight.w700,
-      height: 1.25,
+      height: 1.2,
       shadows: [
-        Shadow(offset: Offset(0, 2), blurRadius: 7, color: Color(0xF2000000)),
-        Shadow(blurRadius: 14, color: Color(0xB3000000)),
+        // Single clean drop shadow, matching the native app (not a heavy halo).
+        Shadow(offset: Offset(0, 2), blurRadius: 4, color: Color(0xCC000000)),
       ],
     );
     return Positioned(
       left: 24,
       right: 24,
-      bottom: _showControls ? 150 : 56,
+      bottom: _showControls ? 170 : 90,
       child: IgnorePointer(
         child: Text.rich(
           _subtitleSpan(text, baseStyle),
@@ -1083,6 +1104,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                       onCommitScrub: _commitScrub,
                       onCancelScrub: _cancelScrub,
                       onSeekStep: _scrubStep,
+                      onTouchScrubStart: _touchScrubStart,
+                      onTouchScrubTo: _touchScrubTo,
+                      onTouchScrubEnd: _touchScrubEnd,
                       onSeekTo: (p) {
                         _controller?.seekTo(p);
                         _controller?.play();
@@ -1209,6 +1233,9 @@ class _SeekBar extends StatefulWidget {
     required this.onCommitScrub,
     required this.onCancelScrub,
     required this.onSeekStep,
+    required this.onTouchScrubStart,
+    required this.onTouchScrubTo,
+    required this.onTouchScrubEnd,
     required this.onSeekTo,
   });
 
@@ -1220,6 +1247,9 @@ class _SeekBar extends StatefulWidget {
   final VoidCallback onCommitScrub;
   final VoidCallback onCancelScrub;
   final void Function(int deltaMs) onSeekStep;
+  final VoidCallback onTouchScrubStart;
+  final void Function(Duration pos) onTouchScrubTo;
+  final VoidCallback onTouchScrubEnd;
   final void Function(Duration pos) onSeekTo;
 
   @override
@@ -1280,6 +1310,16 @@ class _SeekBarState extends State<_SeekBar> {
     return KeyEventResult.ignored;
   }
 
+  /// Converts a local X offset on the bar into a media position in ms.
+  int? _msForDx(double dx) {
+    final durMs = widget.duration.inMilliseconds;
+    if (durMs <= 0) return null;
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || box.size.width <= 0) return null;
+    final frac = (dx / box.size.width).clamp(0.0, 1.0);
+    return (frac * durMs).round();
+  }
+
   @override
   Widget build(BuildContext context) {
     final durMs = widget.duration.inMilliseconds;
@@ -1295,14 +1335,26 @@ class _SeekBarState extends State<_SeekBar> {
       onFocusChange: (f) => setState(() => _focused = f),
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTapDown: (d) {
-          if (durMs <= 0) return;
-          final box = context.findRenderObject() as RenderBox?;
-          if (box == null) return;
-          final frac = (d.localPosition.dx / box.size.width).clamp(0.0, 1.0);
+        // Tap-to-seek (mouse/touch): one seek to the tapped point.
+        onTapUp: (d) {
+          final ms = _msForDx(d.localPosition.dx);
+          if (ms == null) return;
           widget.focusNode.requestFocus();
-          widget.onSeekTo(Duration(milliseconds: (frac * durMs).round()));
+          widget.onSeekTo(Duration(milliseconds: ms));
         },
+        // Drag-to-seek (mouse/touch): smooth preview, seek once on release.
+        onHorizontalDragStart: (d) {
+          if (widget.duration.inMilliseconds <= 0) return;
+          widget.focusNode.requestFocus();
+          widget.onTouchScrubStart();
+          final ms = _msForDx(d.localPosition.dx);
+          if (ms != null) widget.onTouchScrubTo(Duration(milliseconds: ms));
+        },
+        onHorizontalDragUpdate: (d) {
+          final ms = _msForDx(d.localPosition.dx);
+          if (ms != null) widget.onTouchScrubTo(Duration(milliseconds: ms));
+        },
+        onHorizontalDragEnd: (_) => widget.onTouchScrubEnd(),
         child: SizedBox(
           height: 36,
           child: LayoutBuilder(
