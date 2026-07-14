@@ -26,14 +26,13 @@ class HeroBackdrop extends StatelessWidget {
                 right: 0,
                 width: constraints.maxWidth * 0.80,
                 height: constraints.maxHeight * 0.72,
-                child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 300),
-                  child: CachedNetworkImage(
-                    key: ValueKey(item!.backdropPath),
-                    imageUrl: url,
-                    fit: BoxFit.cover,
-                    fadeInDuration: const Duration(milliseconds: 250),
-                  ),
+                child: CachedNetworkImage(
+                  key: ValueKey(item!.backdropPath),
+                  imageUrl: url,
+                  fit: BoxFit.cover,
+                  width: double.infinity,
+                  height: double.infinity,
+                  fadeInDuration: const Duration(milliseconds: 250),
                 ),
               ),
             // Horizontal fade: Charcoal on the left → transparent, so the

@@ -70,7 +70,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   List<String> _apiSubs = [];
   final List<String> _uploadedSubs = [];
   String? _currentSubUri; // null == off
-  int _pendingSeekMs = 0;
   int _retryCount = 0;
 
   // UI state
@@ -108,13 +107,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   void _wireStreams() {
     _subs.add(_player.stream.position.listen((p) {
       _position = p;
-      _maybeSeekResume();
       _updateNextOverlay();
       if (mounted) setState(() {});
     }));
     _subs.add(_player.stream.duration.listen((d) {
       _duration = d;
-      _maybeSeekResume();
       if (mounted) setState(() {});
     }));
     _subs.add(_player.stream.playing.listen((playing) {
@@ -134,12 +131,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }));
   }
 
-  void _maybeSeekResume() {
-    if (_pendingSeekMs > 0 && _duration.inMilliseconds > 0) {
-      final target = _pendingSeekMs;
-      _pendingSeekMs = 0;
-      _player.seek(Duration(milliseconds: target));
-    }
+  /// Waits until the media reports a real duration (loaded), so a resume seek
+  /// lands correctly. Times out gracefully.
+  Future<void> _waitForDuration() async {
+    if (_player.state.duration.inMilliseconds > 0) return;
+    try {
+      await _player.stream.duration
+          .firstWhere((d) => d.inMilliseconds > 0)
+          .timeout(const Duration(seconds: 12));
+    } catch (_) {}
   }
 
   // ---- Resolve + play ----------------------------------------------------
@@ -211,10 +211,20 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         }
       }
       _computeEpisodeRefs();
-      _pendingSeekMs = _savedResumePosition();
+      final resumeMs = _savedResumePosition();
 
-      await _player.open(Media(_hlsUrl!, httpHeaders: {'User-Agent': _userAgent}),
-          play: true);
+      // Open paused, seek to the resume point once the media is loaded, then
+      // play. Seeking before playback starts avoids the "jumps to the right
+      // spot then snaps back to 0" race.
+      await _player.open(
+        Media(_hlsUrl!, httpHeaders: {'User-Agent': _userAgent}),
+        play: false,
+      );
+      if (resumeMs > 0) {
+        await _waitForDuration();
+        await _player.seek(Duration(milliseconds: resumeMs));
+      }
+      await _player.play();
       _applyDefaultSubtitle();
       _startSaveLoop();
       if (mounted) {
@@ -540,7 +550,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       onPopInvokedWithResult: (didPop, _) async {
         if (didPop) return;
         final leave = await _confirmExit();
-        if (!mounted) return;
+        if (!context.mounted) return;
         if (leave) context.pop();
       },
       child: Scaffold(

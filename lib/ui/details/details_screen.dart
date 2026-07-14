@@ -662,7 +662,7 @@ class _EpisodeRow extends StatelessWidget {
         focusedScale: 1.02,
         borderRadius: BorderRadius.circular(6),
         child: Container(
-          color: AppColors.charcoalLight,
+          color: Colors.transparent,
           padding: const EdgeInsets.all(8),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
