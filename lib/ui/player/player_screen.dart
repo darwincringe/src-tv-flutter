@@ -98,7 +98,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _episode = a.episode;
     _trailerKey = a.trailerKey;
 
-    _player = Player();
+    // Larger demuxer cache smooths HLS network hitches.
+    _player = Player(
+      configuration: const PlayerConfiguration(
+        bufferSize: 64 * 1024 * 1024,
+      ),
+    );
     _controller = VideoController(_player);
     _wireStreams();
     _resolveAndPlay();
@@ -108,7 +113,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _subs.add(_player.stream.position.listen((p) {
       _position = p;
       _updateNextOverlay();
-      if (mounted) setState(() {});
+      // Only repaint the overlay when it's visible; avoids rebuilding the whole
+      // player tree several times a second during playback (reduces stutter).
+      if (mounted && _showControls) setState(() {});
     }));
     _subs.add(_player.stream.duration.listen((d) {
       _duration = d;
@@ -275,9 +282,21 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   void _applyDefaultSubtitle() {
     final opts = _subtitleOptions;
     if (opts.isEmpty) return;
-    final english = opts.where((o) => o.language == 'en');
-    final chosen = english.isNotEmpty ? english.first : null;
-    if (chosen != null) _selectSubtitle(chosen);
+    // Prefer English (case-insensitive, match "en"/"eng"/"english" in the
+    // detected language or the label); otherwise fall back to the first track.
+    SubtitleOption? chosen;
+    for (final o in opts) {
+      final lang = (o.language ?? '').toLowerCase();
+      final label = o.label.toLowerCase();
+      if (lang == 'en' ||
+          lang.contains('eng') ||
+          label.contains('eng') ||
+          label.contains('english')) {
+        chosen = o;
+        break;
+      }
+    }
+    _selectSubtitle(chosen ?? opts.first);
   }
 
   void _selectSubtitle(SubtitleOption? opt) {
@@ -576,6 +595,29 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   controller: _controller,
                   controls: NoVideoControls,
                   fit: BoxFit.contain,
+                  subtitleViewConfiguration: const SubtitleViewConfiguration(
+                    padding: EdgeInsets.fromLTRB(24, 24, 24, 48),
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 34,
+                      fontWeight: FontWeight.w600,
+                      height: 1.3,
+                      backgroundColor: Color(0x00000000),
+                      shadows: [
+                        Shadow(blurRadius: 6, color: Color(0xE6000000)),
+                        Shadow(
+                          offset: Offset(1.5, 1.5),
+                          blurRadius: 5,
+                          color: Color(0xE6000000),
+                        ),
+                        Shadow(
+                          offset: Offset(-1.5, -1.5),
+                          blurRadius: 5,
+                          color: Color(0xE6000000),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
                 if (_loading)
                   const Center(
@@ -681,12 +723,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   ),
                   const SizedBox(width: 8),
                   Expanded(child: _titleText()),
-                  if (isStream)
-                    IconButton(
-                      icon: const Icon(Icons.upload_file, color: Colors.white),
-                      tooltip: 'Upload Subtitle',
-                      onPressed: _uploadSubtitle,
-                    ),
                 ],
               ),
             ),
@@ -748,10 +784,19 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   if (isStream) ...[
                     IconButton(
                       icon: const Icon(Icons.closed_caption, color: Colors.white),
+                      tooltip: 'Subtitles',
                       onPressed: _showSubtitleDialog,
                     ),
+                    const SizedBox(width: 6),
+                    IconButton(
+                      icon: const Icon(Icons.upload_file, color: Colors.white),
+                      tooltip: 'Upload Subtitle',
+                      onPressed: _uploadSubtitle,
+                    ),
+                    const SizedBox(width: 6),
                     IconButton(
                       icon: const Icon(Icons.settings, color: Colors.white),
+                      tooltip: 'Quality',
                       onPressed: _showQualityDialog,
                     ),
                   ],
@@ -809,6 +854,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       );
       return;
     }
+    final currentId = _player.state.track.video.id;
+    final isAuto = currentId == 'auto';
     showDialog<void>(
       context: context,
       builder: (ctx) => SimpleDialog(
@@ -816,10 +863,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         title: const Text('Quality',
             style: TextStyle(color: AppColors.textPrimary)),
         children: [
-          _dialogOption(ctx, 'Auto', false,
+          _dialogOption(ctx, 'Auto', isAuto,
               () => _player.setVideoTrack(VideoTrack.auto())),
           for (final t in tracks)
-            _dialogOption(ctx, '${t.h}p', false,
+            _dialogOption(ctx, '${t.h}p', !isAuto && currentId == t.id,
                 () => _player.setVideoTrack(t)),
         ],
       ),
