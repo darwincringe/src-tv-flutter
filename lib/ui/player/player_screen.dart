@@ -116,13 +116,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           showControls: false,
         ),
         subtitlesConfiguration: const BetterPlayerSubtitlesConfiguration(
-          fontSize: 30,
+          fontSize: 40,
           fontColor: Colors.white,
           outlineEnabled: true,
           outlineColor: Colors.black,
-          outlineSize: 3,
+          outlineSize: 3.5,
           backgroundColor: Color(0x00000000),
-          bottomPadding: 40,
+          bottomPadding: 48,
         ),
         eventListener: _onEvent,
       ),
@@ -245,6 +245,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           subtitles: subs,
           useAsmsSubtitles: false,
           useAsmsTracks: true,
+          // Bound the buffer so each play uses far less heap; the default
+          // (~50s) piled up across movies and OOM-crashed WSA's small heap.
+          bufferingConfiguration: const BetterPlayerBufferingConfiguration(
+            minBufferMs: 15000,
+            maxBufferMs: 30000,
+            bufferForPlaybackMs: 2500,
+            bufferForPlaybackAfterRebufferMs: 5000,
+          ),
         ),
       );
     } catch (_) {
