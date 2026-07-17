@@ -7,7 +7,7 @@ import 'poster_card.dart';
 
 /// A titled horizontal row of poster cards. Mirrors the Kotlin
 /// `CategoryRowSection`.
-class CategoryRowSection extends StatelessWidget {
+class CategoryRowSection extends StatefulWidget {
   const CategoryRowSection({
     super.key,
     required this.row,
@@ -24,6 +24,33 @@ class CategoryRowSection extends StatelessWidget {
   final bool autofocusFirst;
 
   @override
+  State<CategoryRowSection> createState() => _CategoryRowSectionState();
+}
+
+class _CategoryRowSectionState extends State<CategoryRowSection> {
+  // When a card in this row gains focus, scroll the whole section (title + row)
+  // into view vertically so the title is never clipped and the row snaps near
+  // the top of the list — this is what makes D-pad up/down navigation land
+  // predictably on TV. Uses the section's own context, which sits in the outer
+  // vertical list only, so horizontal scrolling of the row is untouched.
+  void _ensureSectionVisible() {
+    // Runs shortly after the framework's own directional-focus scroll (which
+    // otherwise pins the card to the viewport edge and clips this row's title),
+    // so our section-level alignment — which keeps the title in view and snaps
+    // the row near the top — is the one that sticks.
+    Future.delayed(const Duration(milliseconds: 80), () {
+      if (!mounted) return;
+      Scrollable.ensureVisible(
+        context,
+        alignment: 0.08,
+        alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
+        duration: const Duration(milliseconds: 240),
+        curve: Curves.easeOut,
+      );
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -31,7 +58,7 @@ class CategoryRowSection extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.only(left: 40, bottom: 10),
           child: Text(
-            row.title,
+            widget.row.title,
             style: const TextStyle(
               color: AppColors.textPrimary,
               fontSize: 18,
@@ -46,18 +73,21 @@ class CategoryRowSection extends StatelessWidget {
             // Don't clip the focus scale-up of the poster cards.
             clipBehavior: Clip.none,
             padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 6),
-            itemCount: row.items.length,
+            itemCount: widget.row.items.length,
             separatorBuilder: (_, _) => const SizedBox(width: 14),
             itemBuilder: (context, index) {
-              final item = row.items[index];
+              final item = widget.row.items[index];
               return PosterCard(
                 item: item,
-                autofocus: index == 0 && autofocusFirst,
-                focusNode: index == 0 ? firstItemFocusNode : null,
+                autofocus: index == 0 && widget.autofocusFirst,
+                focusNode: index == 0 ? widget.firstItemFocusNode : null,
                 onFocusChange: (f) {
-                  if (f) onItemFocus?.call(item);
+                  if (f) {
+                    widget.onItemFocus?.call(item);
+                    _ensureSectionVisible();
+                  }
                 },
-                onTap: () => onItemTap(item),
+                onTap: () => widget.onItemTap(item),
               );
             },
           ),

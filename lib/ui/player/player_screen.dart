@@ -10,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../../core/theme.dart';
+import '../../data/introdb/introdb_client.dart';
 import '../../data/models/details_dto.dart';
 import '../../data/repository/media_repository.dart';
 import '../../data/store/active_playback.dart';
@@ -17,8 +18,10 @@ import '../../data/store/subtitle_pref.dart';
 import '../../data/store/watch_progress.dart';
 import '../../data/tmdb/image_urls.dart';
 import '../../data/youtube/youtube_extractor.dart';
+import '../widgets/branded_loader.dart';
 import 'player_args.dart';
 import 'subtitle_config.dart';
+import 'subtitle_parser.dart';
 
 class _EpisodeRef {
   final int season;
@@ -70,6 +73,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   // Streaming state
   final List<SubtitleOption> _uploadedSubs = [];
   List<SubtitleOption> _subOptions = []; // all current subtitle options
+  // We fetch + parse subtitles ourselves (see subtitle_parser.dart) and render
+  // them in our own overlay, so better_player never parses them.
+  List<SubtitleCue> _cues = [];
+  int _activeSubIndex = -1; // index into _subOptions; -1 = off
+  int _subLoadToken = 0; // guards against a stale async load winning
   int _resumeTargetMs = 0;
   bool _resumeDone = true;
   int _retryCount = 0;
@@ -79,13 +87,24 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   String? _errorMsg;
   bool _showControls = true;
   bool _playing = false;
-  bool _showNextOverlay = false;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
 
-  // TV / D-pad control state
+  // Recap/intro/outro timings (introdb) for the current TV episode, and the
+  // currently-applicable action ('recap' | 'intro' | 'next' | null) which
+  // drives the Skip Recap / Skip Intro / Next Episode button.
+  MediaSegments? _segments;
+  String? _actionKind;
+  bool _autoHideArmed = false; // controls auto-hide armed once playback begins
+
+  // TV / D-pad control state.
+  // A scope (not a plain Focus) so that if a focused control is rebuilt away,
+  // focus falls back HERE — letting us catch the next key and recover instead
+  // of stranding focus somewhere the remote can't drive.
+  final FocusScopeNode _rootScope = FocusScopeNode(debugLabel: 'playerRoot');
   final FocusNode _playPauseFocus = FocusNode(debugLabel: 'playpause');
   final FocusNode _seekFocus = FocusNode(debugLabel: 'seek');
+  final FocusNode _skipFocus = FocusNode(debugLabel: 'skip');
   bool _scrubbing = false; // seek-bar "scrub mode" active
   int _scrubPreviewMs = 0; // marker position while scrubbing (not yet applied)
   bool _wasPlayingBeforeScrub = false;
@@ -148,6 +167,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       case BetterPlayerEventType.play:
         _playing = true;
         WakelockPlus.enable();
+        // Arm the auto-hide countdown ONCE when playback first begins (not on
+        // every play event — buffering fires repeated plays that would keep
+        // resetting it and the controls would never fade).
+        if (!_autoHideArmed) {
+          _autoHideArmed = true;
+          _restartHideTimer();
+        }
         if (mounted) setState(() {});
         break;
       case BetterPlayerEventType.pause:
@@ -237,10 +263,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         }
       }
       _computeEpisodeRefs();
+      if (_type == 'tv' && _season != null && _episode != null) {
+        _fetchSegments(_season!, _episode!);
+      }
       _resumeTargetMs = _savedResumePosition();
       _resumeDone = _resumeTargetMs <= 0;
 
-      final subs = _buildSubtitleSources(res.subtitles);
+      _setupSubtitles(res.subtitles);
       _controller ??= _buildController();
       await _controller!.setupDataSource(
         BetterPlayerDataSource(
@@ -248,7 +277,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           res.hlsUrl!,
           videoFormat: BetterPlayerVideoFormat.hls,
           headers: const {'User-Agent': _userAgent},
-          subtitles: subs,
+          // Subtitles are handled entirely by us (fetch + parse + render), not
+          // by better_player — its SRT parser crashes on 3+ line cues.
           useAsmsSubtitles: false,
           useAsmsTracks: true,
           // Bound the buffer so each play uses far less heap; the default
@@ -294,27 +324,51 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   // ---- Subtitles ---------------------------------------------------------
 
-  List<BetterPlayerSubtitlesSource> _buildSubtitleSources(
-    List<String> apiUrls,
-  ) {
-    final opts = [
+  void _setupSubtitles(List<String> apiUrls) {
+    _subOptions = [
       ...apiSubtitleOptions(apiUrls),
       ..._uploadedSubs,
     ];
-    _subOptions = opts;
-    final defaultIndex = _defaultSubtitleIndex(opts);
+    _selectSubtitle(_defaultSubtitleIndex(_subOptions), remember: false);
+  }
 
-    return [
-      for (var i = 0; i < opts.length; i++)
-        BetterPlayerSubtitlesSource(
-          type: opts[i].uri.startsWith('http')
-              ? BetterPlayerSubtitlesSourceType.network
-              : BetterPlayerSubtitlesSourceType.file,
-          name: opts[i].label,
-          urls: [opts[i].uri],
-          selectedByDefault: i == defaultIndex,
-        ),
-    ];
+  /// Selects a subtitle track (or -1 for Off), remembers the choice, and loads
+  /// its cues in the background. Guarded by a token so switching tracks quickly
+  /// never lets a slow earlier load overwrite a newer one.
+  Future<void> _selectSubtitle(int index, {bool remember = true}) async {
+    _activeSubIndex = index;
+    final token = ++_subLoadToken;
+    if (index < 0) {
+      if (mounted) setState(() => _cues = []);
+      if (remember) {
+        SubtitlePrefStore.save(
+            _type, _tmdbId, _season, const SubtitlePref(off: true));
+      }
+      return;
+    }
+    if (index >= _subOptions.length) return;
+    final opt = _subOptions[index];
+    if (remember) {
+      SubtitlePrefStore.save(_type, _tmdbId, _season,
+          SubtitlePref(name: opt.label, language: opt.language));
+    }
+    // The subtitle host (OpenSubtitles) intermittently rate-limits back-to-back
+    // requests — especially right after auto-advancing an episode — so a single
+    // fetch can come back empty. Retry a couple of times before giving up, which
+    // is why manually re-selecting "just worked" before.
+    var cues = await loadSubtitleCues(opt.uri, userAgent: _userAgent);
+    for (var attempt = 0; cues.isEmpty && attempt < 2; attempt++) {
+      await Future.delayed(const Duration(milliseconds: 800));
+      if (!mounted || token != _subLoadToken) return;
+      cues = await loadSubtitleCues(opt.uri, userAgent: _userAgent);
+    }
+    if (!mounted || token != _subLoadToken) return;
+    setState(() => _cues = cues);
+    if (cues.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not load that subtitle')),
+      );
+    }
   }
 
   /// Chooses the default subtitle: the remembered choice (matched by name, then
@@ -346,19 +400,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     return opts.isNotEmpty ? 0 : -1;
   }
 
-  void _rememberSubtitle(String? name) {
-    final opt = _subOptions.firstWhere(
-      (o) => o.label == name,
-      orElse: () => SubtitleOption(uri: '', label: name ?? ''),
-    );
-    SubtitlePrefStore.save(
-      _type,
-      _tmdbId,
-      _season,
-      SubtitlePref(name: name, language: opt.language),
-    );
-  }
-
   Future<void> _uploadSubtitle() async {
     const group = XTypeGroup(
       label: 'subtitles',
@@ -368,13 +409,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (file == null) return;
     final opt = uploadedSubtitleOption(file.path, _uploadedSubs.length);
     _uploadedSubs.add(opt);
-    final source = BetterPlayerSubtitlesSource(
-      type: BetterPlayerSubtitlesSourceType.file,
-      name: opt.label,
-      urls: [opt.uri],
-    );
-    _controller?.betterPlayerSubtitlesSourceList.add(source);
-    _controller?.setupSubtitleSource(source);
+    setState(() => _subOptions = [..._subOptions, opt]);
+    await _selectSubtitle(_subOptions.length - 1);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Subtitle added')),
@@ -383,17 +419,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   void _showSubtitleDialog() {
-    final list = _controller?.betterPlayerSubtitlesSourceList ?? [];
-    final selectable = list
-        .where((s) => s.type != BetterPlayerSubtitlesSourceType.none)
-        .toList();
-    if (selectable.isEmpty) {
+    if (_subOptions.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('No subtitles available')),
       );
       return;
     }
-    final current = _controller?.betterPlayerSubtitlesSource;
     showDialog<void>(
       context: context,
       builder: (ctx) => SimpleDialog(
@@ -401,27 +432,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         title: const Text('Subtitles',
             style: TextStyle(color: AppColors.textPrimary)),
         children: [
-          _dialogOption(
-            ctx,
-            'Off',
-            current == null ||
-                current.type == BetterPlayerSubtitlesSourceType.none,
-            () {
-              final none = list.firstWhere(
-                (s) => s.type == BetterPlayerSubtitlesSourceType.none,
-                orElse: () => BetterPlayerSubtitlesSource(
-                    type: BetterPlayerSubtitlesSourceType.none),
-              );
-              _controller?.setupSubtitleSource(none);
-              SubtitlePrefStore.save(
-                  _type, _tmdbId, _season, const SubtitlePref(off: true));
-            },
-          ),
-          for (final s in selectable)
-            _dialogOption(ctx, s.name ?? 'Subtitle', current == s, () {
-              _controller?.setupSubtitleSource(s);
-              _rememberSubtitle(s.name);
-            }),
+          _dialogOption(ctx, 'Off', _activeSubIndex < 0,
+              () => _selectSubtitle(-1)),
+          for (var i = 0; i < _subOptions.length; i++)
+            _dialogOption(ctx, _subOptions[i].label, i == _activeSubIndex,
+                () => _selectSubtitle(i)),
         ],
       ),
     );
@@ -472,22 +487,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     bool selected,
     VoidCallback onTap,
   ) {
-    return SimpleDialogOption(
-      onPressed: () {
+    return _DialogOption(
+      label: label,
+      selected: selected,
+      autofocus: selected, // land D-pad focus on the current choice
+      onTap: () {
         onTap();
         Navigator.pop(ctx);
       },
-      child: Row(
-        children: [
-          Icon(
-            selected ? Icons.radio_button_checked : Icons.radio_button_off,
-            color: selected ? AppColors.textPrimary : AppColors.textSecondary,
-            size: 18,
-          ),
-          const SizedBox(width: 12),
-          Text(label, style: const TextStyle(color: AppColors.textPrimary)),
-        ],
-      ),
     );
   }
 
@@ -533,15 +540,47 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   void _playEpisode(_EpisodeRef ref) {
+    // Pause the current episode straight away so it doesn't keep playing (audio
+    // + video) behind the loading spinner while the next one is resolved.
+    _controller?.pause();
     setState(() {
       _season = ref.season;
       _episode = ref.episode;
       _episodeName = null;
-      _showNextOverlay = false;
       _retryCount = 0;
+      _cues = []; // drop the previous episode's subtitles immediately
+      _segments = null; // and its recap/intro/outro timings
+      _actionKind = null;
+      _autoHideArmed = false; // re-arm auto-hide for the new episode
     });
     _resolveAndPlay();
   }
+
+  Future<void> _fetchSegments(int season, int episode) async {
+    try {
+      final seg = await ref
+          .read(mediaRepositoryProvider)
+          .episodeSegments(_tmdbId, season, episode);
+      if (!mounted || _season != season || _episode != episode) return;
+      setState(() => _segments = seg);
+    } catch (_) {}
+  }
+
+  void _seekToMs(int ms) {
+    _controller?.seekTo(Duration(milliseconds: ms));
+    _controller?.play();
+    _restartHideTimer();
+  }
+
+  static final _activateKeys = <LogicalKeyboardKey>{
+    LogicalKeyboardKey.enter,
+    LogicalKeyboardKey.numpadEnter,
+    LogicalKeyboardKey.space,
+    LogicalKeyboardKey.select,
+    LogicalKeyboardKey.gameButtonA,
+  };
+
+  bool _isActivateKey(LogicalKeyboardKey k) => _activateKeys.contains(k);
 
   // ---- Progress ----------------------------------------------------------
 
@@ -565,42 +604,91 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         _controller?.seekTo(Duration(milliseconds: target));
         _controller?.play();
       }
-      _updateNextOverlay();
+      final action = _computeActionKind();
+      final actionChanged = action != _actionKind;
+      if (actionChanged) {
+        _actionKind = action;
+        // When a Skip/Next button appears, focus it so the remote OK skips
+        // straight away (rather than revealing the controls).
+        if (action != null) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted && _actionKind != null && _skipFocus.canRequestFocus) {
+              _skipFocus.requestFocus();
+            }
+          });
+        }
+      }
       final sub = _currentSubtitleText();
       final subChanged = sub != _subtitleText;
       if (subChanged) _subtitleText = sub;
       _ticks++;
       if (_ticks % 60 == 0) _saveProgress(); // every 30s
-      if (mounted && (_showControls || subChanged)) {
+      if (mounted && (_showControls || subChanged || actionChanged)) {
         setState(() {});
       }
     });
   }
 
-  /// Current subtitle text for the active source, computed from the parsed
-  /// lines + position (we render it ourselves for a bold/shadow Netflix look).
+  /// Current subtitle text for the active track, from our own parsed cues at
+  /// the current position (rendered by us for a bold/shadow Netflix look).
   String? _currentSubtitleText() {
-    final lines = _controller?.subtitlesLines ?? [];
-    if (lines.isEmpty) return null;
+    if (_cues.isEmpty) return null;
     final pos = _position;
-    for (final l in lines) {
-      final start = l.start, end = l.end;
-      if (start != null && end != null && pos >= start && pos <= end) {
-        final t = (l.texts ?? []).join('\n').trim();
+    for (final c in _cues) {
+      if (pos >= c.start && pos <= c.end) {
+        final t = c.text.trim();
         return t.isEmpty ? null : t;
       }
     }
     return null;
   }
 
-  void _updateNextOverlay() {
-    if (_mode != PlayerMode.stream) return;
+  /// Which contextual button applies at the current position: a recap/intro to
+  /// skip (from introdb), or the outro → Next Episode. Falls back to the last
+  /// 5% of the episode for Next Episode when introdb has no outro.
+  String? _computeActionKind() {
+    if (_mode != PlayerMode.stream) return null;
+    final posMs = _position.inMilliseconds;
     final dur = _duration.inMilliseconds;
-    final show =
-        dur > 0 && _position.inMilliseconds >= dur * 0.95 && _nextRef != null;
-    if (show != _showNextOverlay && mounted) {
-      setState(() => _showNextOverlay = show);
+    final seg = _segments;
+    // Trust an introdb outro only if it lands in the back half of the runtime —
+    // some crowd-sourced entries have a bogus early outro that would otherwise
+    // pop "Next Episode" during the opening.
+    final outro = seg?.outro;
+    final outroValid = outro != null && (dur <= 0 || outro.startMs > dur * 0.5);
+    if (seg != null) {
+      final intro = seg.intro;
+      if (intro != null && posMs >= intro.startMs && posMs < intro.endMs) {
+        return 'intro';
+      }
+      final recap = seg.recap;
+      if (recap != null && posMs >= recap.startMs && posMs < recap.endMs) {
+        return 'recap';
+      }
+      if (outroValid && posMs >= outro.startMs && _nextRef != null) {
+        return 'next';
+      }
     }
+    if (_isTv &&
+        _nextRef != null &&
+        dur > 0 &&
+        posMs >= dur * 0.95 &&
+        !outroValid) {
+      return 'next';
+    }
+    return null;
+  }
+
+  /// The position at which the title counts as "finished". For episodes with
+  /// introdb data this is the outro start (the credits); otherwise — and always
+  /// for movies — it's 95% of the runtime.
+  int _completionThresholdMs() {
+    final dur = _duration.inMilliseconds;
+    final outro = _segments?.outro;
+    if (_isTv && outro != null && (dur <= 0 || outro.startMs > dur * 0.5)) {
+      return outro.startMs;
+    }
+    return (dur * 0.95).round();
   }
 
   void _saveProgress() {
@@ -609,7 +697,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     final pos = _position.inMilliseconds;
     final dur = _duration.inMilliseconds;
     if (dur <= 0) return;
-    if (pos >= dur * 0.95) {
+    if (pos >= _completionThresholdMs()) {
       _markReachedEnd();
       return;
     }
@@ -760,11 +848,25 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   void _restartHideTimer() {
     _hideTimer?.cancel();
-    _hideTimer = Timer(const Duration(seconds: 5), () {
-      if (mounted && _playing && !_scrubbing) {
-        setState(() => _showControls = false);
-      }
-    });
+    _hideTimer = Timer(const Duration(seconds: 5), _maybeHide);
+  }
+
+  void _maybeHide() {
+    if (!mounted || _scrubbing) return;
+    if (_playing) {
+      _hideControls();
+    } else {
+      // Paused/buffering — re-check shortly so the controls still fade once
+      // playback is actually running, instead of giving up.
+      _hideTimer = Timer(const Duration(seconds: 2), _maybeHide);
+    }
+  }
+
+  // Hide the controls and move focus back to the root scope so the next remote
+  // key is caught (to reveal them) instead of vanishing into a hidden control.
+  void _hideControls() {
+    setState(() => _showControls = false);
+    _rootScope.requestFocus();
   }
 
   // ---- Lifecycle ---------------------------------------------------------
@@ -796,13 +898,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         content: const Text('Do you want to leave the video?',
             style: TextStyle(color: AppColors.textSecondary)),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Keep watching'),
+          _DialogButton(
+            label: 'Keep watching',
+            autofocus: true,
+            onTap: () => Navigator.pop(ctx, false),
           ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Leave'),
+          _DialogButton(
+            label: 'Leave',
+            onTap: () => Navigator.pop(ctx, true),
           ),
         ],
       ),
@@ -823,8 +926,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _hideTimer?.cancel();
     _saveProgress();
     _controller?.dispose();
+    _rootScope.dispose();
     _playPauseFocus.dispose();
     _seekFocus.dispose();
+    _skipFocus.dispose();
     WakelockPlus.disable();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
@@ -848,23 +953,41 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       },
       child: Scaffold(
         backgroundColor: Colors.black,
-        body: Focus(
-          autofocus: true,
+        body: FocusScope(
+          node: _rootScope,
+          // NOTE: no autofocus — while controls are visible the play/pause
+          // button must own focus so D-pad arrows can move between controls.
+          // This handler fires for every key while the player has focus, incl.
+          // when focus has fallen back to this scope.
           onKeyEvent: (node, event) {
             if (event is! KeyDownEvent) return KeyEventResult.ignored;
             if (!_showControls) {
-              // First press just reveals the controls and focuses play/pause —
-              // it does not activate anything.
+              // If a Skip Recap / Skip Intro / Next Episode button is showing,
+              // it's focused — let the OK/Select key activate IT instead of
+              // just revealing the controls.
+              if (_actionKind != null && _isActivateKey(event.logicalKey)) {
+                return KeyEventResult.ignored;
+              }
+              // Otherwise any remote key just reveals the controls and lands
+              // focus on play/pause — it does not activate anything.
               _revealControls();
               return KeyEventResult.handled;
             }
             _restartHideTimer();
+            // Recover if focus was lost (e.g. a focused control got rebuilt
+            // away) so navigation keeps working no matter how much the user
+            // moves around the controls.
+            final pf = FocusManager.instance.primaryFocus;
+            if (pf == null || pf == _rootScope) {
+              _playPauseFocus.requestFocus();
+              return KeyEventResult.handled;
+            }
             return KeyEventResult.ignored; // let the focused control handle it
           },
           child: GestureDetector(
             onTap: () {
               if (_showControls) {
-                setState(() => _showControls = false);
+                _hideControls();
               } else {
                 _revealControls();
               }
@@ -875,14 +998,16 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                 if (_controller != null)
                   BetterPlayer(controller: _controller!),
                 _subtitleOverlay(),
+                // While buffering, show ONLY the branded loader (logo + white
+                // spinner) on black — no transport controls.
                 if (_loading)
-                  const Center(
-                    child: CircularProgressIndicator(color: Colors.white),
+                  const Positioned.fill(
+                    child: BrandedLoader(compact: true, background: Colors.black),
                   ),
                 if (_errorMsg != null) _errorView(),
-                if (_errorMsg == null && _showControls) _controlsOverlay(),
-                if (_errorMsg == null && _showNextOverlay && _nextRef != null)
-                  _nextEpisodeOverlay(),
+                if (_errorMsg == null && _showControls && !_loading)
+                  _controlsOverlay(),
+                if (_errorMsg == null && !_loading) _segmentActionOverlay(),
               ],
             ),
           ),
@@ -894,12 +1019,18 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   Widget _subtitleOverlay() {
     final text = _subtitleText;
     if (text == null || text.isEmpty) return const SizedBox.shrink();
-    const baseStyle = TextStyle(
+    // Size the subtitle as a fraction of screen width, not a fixed pixel size.
+    // A TV renders at a higher density (smaller logical width) than the test
+    // box, so a fixed 50px looked correct on the emulator but was giant on the
+    // TV. 0.026 * 1920 = 50 (unchanged on the 1920-logical emulator).
+    final width = MediaQuery.of(context).size.width;
+    final fontSize = (width * 0.04).clamp(24.0, 54.0);
+    final baseStyle = TextStyle(
       color: Colors.white,
-      fontSize: 50,
+      fontSize: fontSize,
       fontWeight: FontWeight.w700,
       height: 1.2,
-      shadows: [
+      shadows: const [
         // Single clean drop shadow, matching the native app (not a heavy halo).
         Shadow(offset: Offset(0, 2), blurRadius: 4, color: Color(0xCC000000)),
       ],
@@ -907,7 +1038,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     return Positioned(
       left: 24,
       right: 24,
-      bottom: _showControls ? 170 : 90,
+      bottom: _showControls ? 135 : 55,
       child: IgnorePointer(
         child: Text.rich(
           _subtitleSpan(text, baseStyle),
@@ -1053,31 +1184,42 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              if (isStream && _prevRef != null)
+              if (isStream && _prevRef != null) ...[
                 _FocusIconButton(
+                  key: const ValueKey('prev'),
                   icon: Icons.skip_previous,
                   onTap: () => _playEpisode(_prevRef!),
                 ),
+                const SizedBox(width: 14),
+              ],
               _FocusIconButton(
+                key: const ValueKey('replay30'),
                 icon: Icons.replay_30,
                 onTap: () => _seekBy(-_seekStepMs),
               ),
+              const SizedBox(width: 14),
               _FocusIconButton(
-                icon: _playing ? Icons.pause_circle : Icons.play_circle,
+                key: const ValueKey('playpause'),
+                icon: _playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
                 size: 64,
                 focusNode: _playPauseFocus,
                 autofocus: true, // land focus here whenever controls appear
                 onTap: _togglePlay,
               ),
+              const SizedBox(width: 14),
               _FocusIconButton(
+                key: const ValueKey('forward30'),
                 icon: Icons.forward_30,
                 onTap: () => _seekBy(_seekStepMs),
               ),
-              if (isStream && _nextRef != null)
+              if (isStream && _nextRef != null) ...[
+                const SizedBox(width: 14),
                 _FocusIconButton(
+                  key: const ValueKey('next'),
                   icon: Icons.skip_next,
                   onTap: () => _playEpisode(_nextRef!),
                 ),
+              ],
             ],
           ),
           const Spacer(),
@@ -1144,14 +1286,47 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     );
   }
 
-  Widget _nextEpisodeOverlay() {
+  // Contextual Skip Recap / Skip Intro / Next Episode button, driven by
+  // introdb segment timings. Auto-focuses when it appears so the remote's OK
+  // button triggers it immediately (the expected TV behaviour); positioned
+  // above the control bar so it doesn't collide with the transport row.
+  Widget _segmentActionOverlay() {
+    final kind = _actionKind;
+    if (kind == null) return const SizedBox.shrink();
+    late final String label;
+    late final IconData icon;
+    late final VoidCallback onTap;
+    switch (kind) {
+      case 'intro':
+        label = 'Skip Intro';
+        icon = Icons.fast_forward;
+        onTap = () => _seekToMs(_segments!.intro!.endMs);
+        break;
+      case 'recap':
+        label = 'Skip Recap';
+        icon = Icons.fast_forward;
+        onTap = () => _seekToMs(_segments!.recap!.endMs);
+        break;
+      case 'next':
+      default:
+        label = 'Next Episode';
+        icon = Icons.skip_next;
+        onTap = () {
+          if (_nextRef != null) _playEpisode(_nextRef!);
+        };
+        break;
+    }
     return Positioned(
-      right: 24,
-      bottom: 110,
-      child: FilledButton.icon(
-        onPressed: () => _playEpisode(_nextRef!),
-        icon: const Icon(Icons.skip_next),
-        label: const Text('Next Episode'),
+      right: 28,
+      bottom: _showControls ? 150 : 60,
+      child: _SkipButton(
+        // A key per kind so the button remounts (and re-autofocuses) when the
+        // active segment changes.
+        key: ValueKey(kind),
+        focusNode: _skipFocus,
+        label: label,
+        icon: icon,
+        onTap: onTap,
       ),
     );
   }
@@ -1166,9 +1341,80 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 }
 
+/// Prominent Skip Recap / Skip Intro / Next Episode button. Always shows a
+/// white border (legible over video); inverts to a solid white fill on focus.
+/// Auto-focuses on appear so the remote OK button triggers it right away.
+class _SkipButton extends StatefulWidget {
+  const _SkipButton({
+    super.key,
+    required this.label,
+    required this.icon,
+    required this.onTap,
+    this.focusNode,
+  });
+  final String label;
+  final IconData icon;
+  final VoidCallback onTap;
+  final FocusNode? focusNode;
+
+  @override
+  State<_SkipButton> createState() => _SkipButtonState();
+}
+
+class _SkipButtonState extends State<_SkipButton> {
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableActionDetector(
+      focusNode: widget.focusNode,
+      autofocus: true,
+      onFocusChange: (f) => setState(() => _focused = f),
+      mouseCursor: SystemMouseCursors.click,
+      actions: {
+        ActivateIntent: CallbackAction<ActivateIntent>(
+          onInvoke: (_) {
+            widget.onTap();
+            return null;
+          },
+        ),
+      },
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          decoration: BoxDecoration(
+            color: _focused ? AppColors.focusRing : Colors.black.withValues(alpha: 0.55),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: AppColors.focusRing, width: 2),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(widget.icon,
+                  size: 20, color: _focused ? Colors.black : Colors.white),
+              const SizedBox(width: 8),
+              Text(
+                widget.label,
+                style: TextStyle(
+                  color: _focused ? Colors.black : Colors.white,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// Icon button with a clear focus ring for D-pad navigation.
 class _FocusIconButton extends StatefulWidget {
   const _FocusIconButton({
+    super.key,
     required this.icon,
     required this.onTap,
     this.size = 40,
@@ -1185,13 +1431,105 @@ class _FocusIconButton extends StatefulWidget {
   State<_FocusIconButton> createState() => _FocusIconButtonState();
 }
 
-class _FocusIconButtonState extends State<_FocusIconButton> {
+class _FocusIconButtonState extends State<_FocusIconButton>
+    with SingleTickerProviderStateMixin {
   bool _focused = false;
+
+  // A quick "blink"/pulse played on every activation (D-pad OK or tap): the
+  // icon dips to 0.82 and springs back, giving tactile feedback on -30/+30 etc.
+  late final AnimationController _pulseCtrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 180),
+  );
+  late final Animation<double> _pulse = TweenSequence<double>([
+    TweenSequenceItem(tween: Tween(begin: 1.0, end: 0.82), weight: 1),
+    TweenSequenceItem(tween: Tween(begin: 0.82, end: 1.0), weight: 1),
+  ]).animate(CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeOut));
+
+  @override
+  void dispose() {
+    _pulseCtrl.dispose();
+    super.dispose();
+  }
+
+  void _handleActivate() {
+    widget.onTap();
+    _pulseCtrl.forward(from: 0);
+  }
 
   @override
   Widget build(BuildContext context) {
     return FocusableActionDetector(
       focusNode: widget.focusNode,
+      autofocus: widget.autofocus,
+      onFocusChange: (f) => setState(() => _focused = f),
+      mouseCursor: SystemMouseCursors.click,
+      actions: {
+        ActivateIntent: CallbackAction<ActivateIntent>(
+          onInvoke: (_) {
+            _handleActivate();
+            return null;
+          },
+        ),
+      },
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: _handleActivate,
+        child: AnimatedScale(
+          scale: _focused ? 1.15 : 1.0,
+          duration: const Duration(milliseconds: 120),
+          child: ScaleTransition(
+            scale: _pulse, // click blink, multiplies with the focus scale
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 120),
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                // Transparent disc; a white ring marks focus (no filled bg).
+                color: Colors.transparent,
+                border: _focused
+                    ? Border.all(color: Colors.white, width: 2.5)
+                    : null,
+              ),
+              child: Icon(
+                widget.icon,
+                color: Colors.white,
+                size: widget.size * 0.7,
+                // Soft shadow so the white icon stays legible over bright video.
+                shadows: const [
+                  Shadow(color: Color(0xB3000000), blurRadius: 10),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A dialog action button (Keep watching / Leave) with a clear D-pad focus
+/// state — inverts to a solid light fill when focused.
+class _DialogButton extends StatefulWidget {
+  const _DialogButton({
+    required this.label,
+    required this.onTap,
+    this.autofocus = false,
+  });
+  final String label;
+  final VoidCallback onTap;
+  final bool autofocus;
+
+  @override
+  State<_DialogButton> createState() => _DialogButtonState();
+}
+
+class _DialogButtonState extends State<_DialogButton> {
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableActionDetector(
       autofocus: widget.autofocus,
       onFocusChange: (f) => setState(() => _focused = f),
       mouseCursor: SystemMouseCursors.click,
@@ -1207,17 +1545,89 @@ class _FocusIconButtonState extends State<_FocusIconButton> {
         behavior: HitTestBehavior.opaque,
         onTap: widget.onTap,
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 120),
-          padding: const EdgeInsets.all(8),
+          duration: const Duration(milliseconds: 100),
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
           decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: _focused ? Colors.white24 : Colors.transparent,
+            color: _focused ? AppColors.focusRing : Colors.transparent,
+            borderRadius: BorderRadius.circular(6),
             border: Border.all(
-              color: _focused ? Colors.white : Colors.transparent,
-              width: 2,
+              color: _focused ? AppColors.focusRing : AppColors.textSecondary,
+              width: 1.5,
             ),
           ),
-          child: Icon(widget.icon, color: Colors.white, size: widget.size * 0.7),
+          child: Text(
+            widget.label,
+            style: TextStyle(
+              color: _focused ? Colors.black : AppColors.textPrimary,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A subtitle/quality dialog row with an unmistakable D-pad focus state — the
+/// focused row inverts to a solid light fill so it's obvious on a TV.
+class _DialogOption extends StatefulWidget {
+  const _DialogOption({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    this.autofocus = false,
+  });
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  final bool autofocus;
+
+  @override
+  State<_DialogOption> createState() => _DialogOptionState();
+}
+
+class _DialogOptionState extends State<_DialogOption> {
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = _focused ? Colors.black : AppColors.textPrimary;
+    return FocusableActionDetector(
+      autofocus: widget.autofocus,
+      onFocusChange: (f) => setState(() => _focused = f),
+      mouseCursor: SystemMouseCursors.click,
+      actions: {
+        ActivateIntent: CallbackAction<ActivateIntent>(
+          onInvoke: (_) {
+            widget.onTap();
+            return null;
+          },
+        ),
+      },
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 100),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+          color: _focused ? AppColors.focusRing : Colors.transparent,
+          child: Row(
+            children: [
+              Icon(
+                widget.selected
+                    ? Icons.radio_button_checked
+                    : Icons.radio_button_off,
+                color: _focused
+                    ? Colors.black
+                    : (widget.selected
+                        ? AppColors.textPrimary
+                        : AppColors.textSecondary),
+                size: 18,
+              ),
+              const SizedBox(width: 12),
+              Text(widget.label, style: TextStyle(color: fg)),
+            ],
+          ),
         ),
       ),
     );

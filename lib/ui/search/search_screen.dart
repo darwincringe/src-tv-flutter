@@ -101,7 +101,8 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
   }
 
   Widget _searchField() {
-    return TextField(
+    return DpadFieldFocus(
+      child: TextField(
       controller: _controller,
       focusNode: _fieldFocus,
       onChanged: _onChanged,
@@ -122,6 +123,7 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
           borderSide: const BorderSide(color: AppColors.textPrimary, width: 2),
         ),
       ),
+      ),
     );
   }
 
@@ -137,6 +139,9 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
         return const _Hint('Something went wrong. Try again.');
       case _Status.results:
         return ListView.separated(
+          // Don't clip the focused row's border/scale at the left/right edges.
+          clipBehavior: Clip.none,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
           itemCount: _results.length,
           separatorBuilder: (_, _) => const SizedBox(height: 8),
           itemBuilder: (context, i) {
@@ -173,7 +178,7 @@ class _SuggestionRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final url = posterUrl(item.posterPath);
+    final url = thumbPosterUrl(item.posterPath);
     final type = item.resolvedType('movie');
     final subtitle = [
       if (item.year != null) item.year!,
@@ -183,6 +188,7 @@ class _SuggestionRow extends StatelessWidget {
       onTap: onTap,
       focusedScale: 1.02,
       borderWidth: 2,
+      ensureVisibleOnFocus: true,
       borderRadius: BorderRadius.circular(6),
       child: Container(
         color: AppColors.charcoalLight,
@@ -195,7 +201,12 @@ class _SuggestionRow extends StatelessWidget {
                 width: 40,
                 height: 58,
                 child: url != null
-                    ? CachedNetworkImage(imageUrl: url, fit: BoxFit.cover)
+                    ? CachedNetworkImage(
+                        imageUrl: url,
+                        fit: BoxFit.cover,
+                        memCacheWidth:
+                            (40 * MediaQuery.devicePixelRatioOf(context)).round(),
+                      )
                     : Container(color: AppColors.charcoal),
               ),
             ),

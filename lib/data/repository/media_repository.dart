@@ -2,6 +2,8 @@ import 'dart:math' as math;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/dates.dart';
+import '../introdb/introdb_client.dart';
 import '../models/details_dto.dart';
 import '../models/language.dart';
 import '../models/media_details.dart';
@@ -17,12 +19,14 @@ import '../tmdb/tmdb_api.dart';
 /// episodes, provides search, similar/recommended, and continue-watching.
 /// Results are cached in memory for the app's lifetime.
 class MediaRepository {
-  MediaRepository({TmdbApi? api, StreamClient? stream})
+  MediaRepository({TmdbApi? api, StreamClient? stream, IntroDbClient? introDb})
       : _api = api ?? TmdbApi(),
-        _stream = stream ?? StreamClient();
+        _stream = stream ?? StreamClient(),
+        _introDb = introDb ?? IntroDbClient();
 
   final TmdbApi _api;
   final StreamClient _stream;
+  final IntroDbClient _introDb;
 
   static const int rowLimit = 10;
   static const String netflix = '8';
@@ -187,9 +191,18 @@ class MediaRepository {
     if (cached != null) return cached;
     final MediaDetails d;
     if (type == 'tv') {
-      d = _tvToDetails(await _api.tvDetails(id));
+      final dto = await _api.tvDetails(id);
+      d = _tvToDetails(dto, comingSoon: isComingSoon(dto.firstAirDate));
     } else {
-      d = _movieToDetails(await _api.movieDetails(id));
+      final dto = await _api.movieDetails(id);
+      // "Coming Soon" for movies = TMDB lists no watch provider in our region.
+      var comingSoon = false;
+      try {
+        comingSoon = !(await _api.movieHasProviders(id, region));
+      } catch (_) {
+        comingSoon = false; // never falsely tag on a failed lookup
+      }
+      d = _movieToDetails(dto, comingSoon: comingSoon);
     }
     _detailsCache[key] = d;
     return d;
@@ -204,9 +217,11 @@ class MediaRepository {
     return eps;
   }
 
-  MediaDetails _movieToDetails(MovieDetailsDto dto) => MediaDetails(
+  MediaDetails _movieToDetails(MovieDetailsDto dto, {bool comingSoon = false}) =>
+      MediaDetails(
         id: dto.id,
         isTv: false,
+        comingSoon: comingSoon,
         title: dto.title ?? '',
         tagline: (dto.tagline?.isNotEmpty ?? false) ? dto.tagline : null,
         overview: dto.overview ?? '',
@@ -222,15 +237,17 @@ class MediaRepository {
             .toList(),
         cast: (dto.credits?.cast ?? const []).take(12).toList(),
         trailerKey: dto.videos?.bestTrailerKey(),
+        releaseDate: dto.releaseDate,
       );
 
-  MediaDetails _tvToDetails(TvDetailsDto dto) {
+  MediaDetails _tvToDetails(TvDetailsDto dto, {bool comingSoon = false}) {
     final seasons = dto.seasons
         .where((s) => s.seasonNumber > 0 && (s.episodeCount ?? 0) > 0)
         .toList();
     return MediaDetails(
       id: dto.id,
       isTv: true,
+      comingSoon: comingSoon,
       title: dto.name ?? '',
       tagline: (dto.tagline?.isNotEmpty ?? false) ? dto.tagline : null,
       overview: dto.overview ?? '',
@@ -249,11 +266,47 @@ class MediaRepository {
       trailerKey: dto.videos?.bestTrailerKey(),
       numberOfSeasons: dto.numberOfSeasons ?? seasons.length,
       seasons: seasons,
+      releaseDate: dto.firstAirDate,
     );
   }
 
   String? _year(String? date) =>
       (date != null && date.length >= 4) ? date.substring(0, 4) : null;
+
+  // ---- Episode segments (recap / intro / outro) --------------------------
+
+  final Map<int, String?> _imdbCache = {};
+  final Map<String, MediaSegments?> _segmentCache = {};
+
+  /// The series' IMDb id (from TMDB external_ids), cached. introdb keys on it.
+  Future<String?> seriesImdbId(int tvId) async {
+    if (_imdbCache.containsKey(tvId)) return _imdbCache[tvId];
+    String? imdb;
+    try {
+      imdb = await _api.tvImdbId(tvId);
+    } catch (_) {
+      imdb = null;
+    }
+    _imdbCache[tvId] = imdb;
+    return imdb;
+  }
+
+  /// Recap / intro / outro timings for a TV episode, or null if unavailable.
+  Future<MediaSegments?> episodeSegments(
+    int tvId,
+    int season,
+    int episode,
+  ) async {
+    final key = '$tvId-$season-$episode';
+    if (_segmentCache.containsKey(key)) return _segmentCache[key];
+    final imdb = await seriesImdbId(tvId);
+    MediaSegments? seg;
+    if (imdb != null && imdb.isNotEmpty) {
+      seg = await _introDb.segments(imdb, season, episode);
+    }
+    _segmentCache[key] = seg;
+    return seg;
+  }
 
   // ---- Streaming ---------------------------------------------------------
 
@@ -315,10 +368,15 @@ class MediaRepository {
   }
 
   /// Continue-watching entries, enriched with title/poster from cached details.
-  /// Unresolvable entries are dropped. Mirrors `continueWatching()`.
+  ///
+  /// Includes in-progress items, every TV series you've started (a finished
+  /// episode advances the record to the next one — the series stays here), and
+  /// fully-watched movies/series. `all()` already sorts completed titles to the
+  /// end, so completed items sink to the bottom instead of disappearing.
   Future<List<WatchProgress>> continueWatching() async {
-    final progs =
-        WatchProgressStore.all().where((p) => p.isContinuable).toList();
+    final progs = WatchProgressStore.all()
+        .where((p) => p.completed || p.isResumable || p.type == 'tv')
+        .toList();
     final out = <WatchProgress>[];
     for (final p in progs) {
       final hasInfo = (p.title?.isNotEmpty ?? false) &&

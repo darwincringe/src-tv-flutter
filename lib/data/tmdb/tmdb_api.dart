@@ -101,4 +101,32 @@ class TmdbApi {
     final resp = await _dio.get('tv/$id/season/$seasonNumber');
     return SeasonDetailsDto.fromJson(resp.data as Map<String, dynamic>);
   }
+
+  /// Whether the movie has any watch provider (stream/rent/buy/free/ads) in
+  /// [region]. When false we tag the title "Coming Soon".
+  Future<bool> movieHasProviders(int id, String region) async {
+    final resp = await _dio.get('movie/$id/watch/providers');
+    final data = resp.data;
+    if (data is! Map) return false;
+    final results = data['results'];
+    if (results is! Map) return false;
+    final r = results[region];
+    if (r is! Map) return false;
+    for (final key in const ['flatrate', 'rent', 'buy', 'free', 'ads']) {
+      final list = r[key];
+      if (list is List && list.isNotEmpty) return true;
+    }
+    return false;
+  }
+
+  /// The series' IMDb id (e.g. "tt1190634"), used to look up recap/intro/outro
+  /// timings on introdb. Null if TMDB has none.
+  Future<String?> tvImdbId(int id) async {
+    final resp = await _dio.get('tv/$id/external_ids');
+    final data = resp.data;
+    if (data is Map && data['imdb_id'] is String) {
+      return data['imdb_id'] as String;
+    }
+    return null;
+  }
 }

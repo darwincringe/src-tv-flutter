@@ -9,7 +9,18 @@ class LoadingView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Center(
-      child: Text(message, style: const TextStyle(color: AppColors.textSecondary)),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox(
+            width: 34,
+            height: 34,
+            child: CircularProgressIndicator(color: Colors.white, strokeWidth: 3),
+          ),
+          const SizedBox(height: 16),
+          Text(message, style: const TextStyle(color: AppColors.textSecondary)),
+        ],
+      ),
     );
   }
 }

@@ -21,6 +21,13 @@ class MediaDetails {
   final String? trailerKey;
   final int numberOfSeasons;
   final List<Season> seasons;
+  /// Full release / first-air date ("2026-08-01").
+  final String? releaseDate;
+
+  /// "Coming Soon" tag: for movies, true when TMDB lists no watch providers in
+  /// our region; for TV, true when the series' first-air date is in the future.
+  /// Purely informational — Play stays enabled.
+  final bool comingSoon;
 
   const MediaDetails({
     required this.id,
@@ -39,6 +46,8 @@ class MediaDetails {
     this.trailerKey,
     this.numberOfSeasons = 0,
     this.seasons = const [],
+    this.releaseDate,
+    this.comingSoon = false,
   });
 }
 

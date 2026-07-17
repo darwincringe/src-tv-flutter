@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Per-title playback progress. Mirrors the Kotlin `WatchProgress` +
@@ -95,6 +96,11 @@ class WatchProgressStore {
   static const String _prefix = 'wp_';
   static late SharedPreferences _prefs;
 
+  /// Bumped whenever progress changes so screens (e.g. Continue Watching) can
+  /// refresh even after in-app navigation back from the player — which, unlike
+  /// backgrounding the app, doesn't fire an app-resume lifecycle event.
+  static final ValueNotifier<int> revision = ValueNotifier<int>(0);
+
   static Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
   }
@@ -103,6 +109,7 @@ class WatchProgressStore {
 
   static void save(WatchProgress p) {
     _prefs.setString(_key(p.type, p.tmdbId), jsonEncode(p.toJson()));
+    revision.value++;
   }
 
   static WatchProgress? get(String type, int tmdbId) {
@@ -117,6 +124,7 @@ class WatchProgressStore {
 
   static void remove(String type, int tmdbId) {
     _prefs.remove(_key(type, tmdbId));
+    revision.value++;
   }
 
   /// All records, active (not completed) first by most-recent, then completed

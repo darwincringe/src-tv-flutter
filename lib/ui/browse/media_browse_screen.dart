@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -6,6 +8,7 @@ import '../../data/models/media_details.dart';
 import '../../data/models/media_item.dart';
 import '../../data/repository/media_repository.dart';
 import '../../data/store/watch_progress.dart';
+import '../widgets/branded_loader.dart';
 import '../widgets/category_row.dart';
 import '../widgets/continue_watching_row.dart';
 import '../widgets/hero_backdrop.dart';
@@ -39,6 +42,11 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
   bool _personalizedReady = false;
   Object? _error;
   MediaItem? _hero;
+  // Rich details for the focused hero (year/rating/runtime/language/genres),
+  // fetched lazily so the top hero shows the same info as the details page.
+  MediaDetails? _heroDetails;
+  Timer? _heroDebounce;
+  int _heroReqId = 0;
 
   final FocusNode _firstCardFocus = FocusNode();
 
@@ -46,14 +54,26 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Refresh Continue Watching whenever playback progress changes — this fires
+    // on returning from the player (in-app navigation, which is NOT an app
+    // resume) so the row updates immediately after watching something.
+    WatchProgressStore.revision.addListener(_onProgressChanged);
     _load();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    WatchProgressStore.revision.removeListener(_onProgressChanged);
+    _heroDebounce?.cancel();
     _firstCardFocus.dispose();
     super.dispose();
+  }
+
+  void _onProgressChanged() {
+    if (mounted && _rows != null && widget.showContinueWatching) {
+      _loadPersonalized();
+    }
   }
 
   @override
@@ -103,10 +123,30 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
     }
   }
 
+  /// Sets the hero to [item] immediately, then (debounced, so fast scrolling
+  /// doesn't spam the API) fetches its details to enrich the hero metadata.
+  void _focusHeroItem(MediaItem item, String fallbackType) {
+    final reqId = ++_heroReqId;
+    setState(() {
+      _hero = item;
+      _heroDetails = null;
+    });
+    _heroDebounce?.cancel();
+    _heroDebounce = Timer(const Duration(milliseconds: 350), () async {
+      try {
+        final type = item.resolvedType(fallbackType);
+        final d = await ref.read(mediaRepositoryProvider).details(type, item.id);
+        if (mounted && reqId == _heroReqId) setState(() => _heroDetails = d);
+      } catch (_) {}
+    });
+  }
+
   void _onProgressFocused(WatchProgress p) async {
+    final reqId = ++_heroReqId;
+    _heroDebounce?.cancel();
     try {
       final d = await ref.read(mediaRepositoryProvider).details(p.type, p.tmdbId);
-      if (!mounted) return;
+      if (!mounted || reqId != _heroReqId) return;
       setState(() {
         _hero = MediaItem(
           id: p.tmdbId,
@@ -118,6 +158,7 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
           posterPath: d.posterPath,
           voteAverage: d.rating,
         );
+        _heroDetails = d;
       });
     } catch (_) {}
   }
@@ -128,7 +169,11 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
       return ErrorView(message: 'Something went wrong.', onRetry: _load);
     }
     if (_rows == null || !_personalizedReady) {
-      return const LoadingView();
+      // Home's first load is the app's cold-start — show the full branded
+      // splash (logo + spinner + caption), handing off from the native splash.
+      return widget.scope == 'home'
+          ? const BrandedLoader(caption: 'Loading your library…')
+          : const LoadingView();
     }
 
     final portrait =
@@ -139,13 +184,21 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
         final heroHeight = constraints.maxHeight * 0.42;
         return Stack(
           children: [
-            Positioned.fill(child: HeroBackdrop(item: _hero)),
+            // Isolated layer: the hero image + gradients don't repaint with the
+            // card grid when focus moves between posters.
+            Positioned.fill(
+              child: RepaintBoundary(child: HeroBackdrop(item: _hero)),
+            ),
             Column(
               children: [
                 SizedBox(
                   height: heroHeight,
                   width: double.infinity,
-                  child: HeroInfo(item: _hero, portrait: portrait),
+                  child: HeroInfo(
+                    item: _hero,
+                    portrait: portrait,
+                    details: _heroDetails,
+                  ),
                 ),
                 Expanded(child: _buildRows()),
               ],
@@ -181,7 +234,8 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
         ),
         autofocusFirst: !focusAssigned,
         firstItemFocusNode: focusAssigned ? null : _firstCardFocus,
-        onItemFocus: (item) => setState(() => _hero = item),
+        onItemFocus: (item) =>
+            _focusHeroItem(item, widget.scope == 'tv' ? 'tv' : 'movie'),
         onItemTap: (item) => openDetails(
           context,
           item.resolvedType(widget.scope == 'tv' ? 'tv' : 'movie'),
@@ -198,7 +252,7 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
         row: row,
         autofocusFirst: assignFocus,
         firstItemFocusNode: assignFocus ? _firstCardFocus : null,
-        onItemFocus: (item) => setState(() => _hero = item),
+        onItemFocus: (item) => _focusHeroItem(item, row.fallbackType),
         onItemTap: (item) =>
             openDetails(context, item.resolvedType(row.fallbackType), item.id),
       ));

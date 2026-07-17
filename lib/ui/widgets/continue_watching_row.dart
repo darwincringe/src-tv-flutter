@@ -34,6 +34,23 @@ class _ContinueWatchingRowState extends State<ContinueWatchingRow> {
   static const int _pageSize = 10;
   int _visible = _pageSize;
 
+  // Scroll the whole section (title + row) into view when a card is focused, so
+  // the title isn't clipped and the row snaps near the top for D-pad nav.
+  void _ensureSectionVisible() {
+    // Shortly after the framework's own directional-focus scroll, so our
+    // section-level alignment (title included) is the one that sticks.
+    Future.delayed(const Duration(milliseconds: 80), () {
+      if (!mounted) return;
+      Scrollable.ensureVisible(
+        context,
+        alignment: 0.08,
+        alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
+        duration: const Duration(milliseconds: 240),
+        curve: Curves.easeOut,
+      );
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final total = widget.items.length;
@@ -75,7 +92,10 @@ class _ContinueWatchingRowState extends State<ContinueWatchingRow> {
                 autofocus: index == 0 && widget.autofocusFirst,
                 focusNode: index == 0 ? widget.firstItemFocusNode : null,
                 onFocusChange: (f) {
-                  if (f) widget.onFocus?.call(p);
+                  if (f) {
+                    widget.onFocus?.call(p);
+                    _ensureSectionVisible();
+                  }
                 },
                 onTap: () => widget.onTap(p),
               );
@@ -126,6 +146,7 @@ class _ContinueWatchingCard extends StatelessWidget {
                   PosterImage(
                     path: progress.posterPath,
                     title: progress.title ?? '',
+                    displayWidth: 130,
                   ),
                   Positioned(
                     left: 0,

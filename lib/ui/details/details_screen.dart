@@ -2,6 +2,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/dates.dart';
 import '../../core/focus.dart';
 import '../../core/navigation.dart';
 import '../../core/theme.dart';
@@ -89,10 +90,32 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
     }
   }
 
+  static const int _episodePageSize = 10;
+  int _episodeWindowStart = 0;
+
+  void _showMoreEpisodes() {
+    final maxStart = _episodes.length - _episodePageSize;
+    setState(() => _episodeWindowStart =
+        (_episodeWindowStart + _episodePageSize).clamp(0, maxStart).toInt());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _firstEpisodeFocus.requestFocus();
+    });
+  }
+
+  void _showPrevEpisodes() {
+    final maxStart = _episodes.length - _episodePageSize;
+    setState(() => _episodeWindowStart =
+        (_episodeWindowStart - _episodePageSize).clamp(0, maxStart).toInt());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _firstEpisodeFocus.requestFocus();
+    });
+  }
+
   Future<void> _loadEpisodes(int season) async {
     setState(() {
       _episodesLoading = true;
       _episodes = [];
+      _episodeWindowStart = 0;
     });
     try {
       final eps = await ref.read(mediaRepositoryProvider).episodes(widget.id, season);
@@ -173,7 +196,7 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
             top: 8,
             left: 8,
             child: SafeArea(
-              child: BackButton(color: AppColors.textPrimary),
+              child: _FocusBackButton(onTap: () => Navigator.of(context).maybePop()),
             ),
           ),
         ],
@@ -209,6 +232,10 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
                   fontStyle: FontStyle.italic,
                 ),
               ),
+            ],
+            if (d.comingSoon) ...[
+              const SizedBox(height: 12),
+              const Row(children: [_ComingSoonBadge(big: true)]),
             ],
             const SizedBox(height: 16),
             Row(
@@ -367,21 +394,42 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
                 style: TextStyle(color: AppColors.textSecondary),
               ),
             )
-          else
-            ...List.generate(_episodes.length, (i) {
-              final e = _episodes[i];
-              return _EpisodeRow(
-                episode: e,
-                focusNode: i == 0 ? _firstEpisodeFocus : null,
-                onTap: () => playStream(
-                  context,
-                  tmdbId: d.id,
-                  type: 'tv',
-                  season: _selectedSeason,
-                  episode: e.episodeNumber,
-                ),
-              );
-            }),
+          else ...[
+            if (_episodeWindowStart > 0)
+              _EpisodeNavButton(
+                label: 'See Previous Episodes',
+                icon: Icons.expand_less,
+                onTap: _showPrevEpisodes,
+              ),
+            // Only render a window of episodes at a time — long series (e.g.
+            // Doraemon, hundreds of episodes) would otherwise build every row
+            // and lag badly.
+            ...() {
+              final end = (_episodeWindowStart + _episodePageSize)
+                  .clamp(0, _episodes.length)
+                  .toInt();
+              return [
+                for (var i = _episodeWindowStart; i < end; i++)
+                  _EpisodeRow(
+                    episode: _episodes[i],
+                    focusNode: i == _episodeWindowStart ? _firstEpisodeFocus : null,
+                    onTap: () => playStream(
+                      context,
+                      tmdbId: d.id,
+                      type: 'tv',
+                      season: _selectedSeason,
+                      episode: _episodes[i].episodeNumber,
+                    ),
+                  ),
+              ];
+            }(),
+            if (_episodeWindowStart + _episodePageSize < _episodes.length)
+              _EpisodeNavButton(
+                label: 'See More Episodes',
+                icon: Icons.expand_more,
+                onTap: _showMoreEpisodes,
+              ),
+          ],
         ],
       ),
     );
@@ -458,7 +506,14 @@ class _DetailsBackdrop extends StatelessWidget {
               right: 0,
               width: c.maxWidth * 0.80,
               height: c.maxHeight * 0.75,
-              child: CachedNetworkImage(imageUrl: url, fit: BoxFit.cover),
+              child: CachedNetworkImage(
+                imageUrl: url,
+                fit: BoxFit.cover,
+                memCacheWidth:
+                    (c.maxWidth * 0.80 * MediaQuery.devicePixelRatioOf(context))
+                        .round()
+                        .clamp(320, 1280),
+              ),
             ),
           // Horizontal fade: charcoal on the left → transparent, so the
           // image's left edge dissolves behind the title/overview.
@@ -494,7 +549,55 @@ class _DetailsBackdrop extends StatelessWidget {
   }
 }
 
-class _PlayButton extends StatelessWidget {
+/// Back button with a clear D-pad focus ring (the Material default is too faint
+/// for a TV across the room).
+class _FocusBackButton extends StatefulWidget {
+  const _FocusBackButton({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  State<_FocusBackButton> createState() => _FocusBackButtonState();
+}
+
+class _FocusBackButtonState extends State<_FocusBackButton> {
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableActionDetector(
+      onFocusChange: (f) => setState(() => _focused = f),
+      mouseCursor: SystemMouseCursors.click,
+      actions: {
+        ActivateIntent: CallbackAction<ActivateIntent>(
+          onInvoke: (_) {
+            widget.onTap();
+            return null;
+          },
+        ),
+      },
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color:
+                _focused ? AppColors.focusRing : Colors.black.withValues(alpha: 0.35),
+          ),
+          child: Icon(
+            Icons.arrow_back,
+            color: _focused ? Colors.black : AppColors.textPrimary,
+            size: 24,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PlayButton extends StatefulWidget {
   const _PlayButton({
     required this.label,
     required this.icon,
@@ -512,37 +615,52 @@ class _PlayButton extends StatelessWidget {
   final FocusNode? focusNode;
 
   @override
+  State<_PlayButton> createState() => _PlayButtonState();
+}
+
+class _PlayButtonState extends State<_PlayButton> {
+  bool _focused = false;
+
+  @override
   Widget build(BuildContext context) {
     return FocusableCard(
-      onTap: onTap,
-      autofocus: autofocus,
-      focusNode: focusNode,
+      onTap: widget.onTap,
+      autofocus: widget.autofocus,
+      focusNode: widget.focusNode,
       focusedScale: 1.05,
       showBorder: false,
-      borderRadius: BorderRadius.circular(8),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-        decoration: BoxDecoration(
-          color: filled ? AppColors.textPrimary : AppColors.charcoalLight,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              icon,
-              size: 20,
-              color: filled ? AppColors.charcoal : AppColors.textPrimary,
-            ),
-            const SizedBox(width: 8),
-            Text(
-              label,
-              style: TextStyle(
-                color: filled ? AppColors.charcoal : AppColors.textPrimary,
-                fontWeight: FontWeight.w600,
+      onFocusChange: (f) => setState(() => _focused = f),
+      // Keep the title/header in view when the Play row is focused.
+      ensureVisibleOnFocus: true,
+      ensureVisibleAlignment: 0.55,
+      borderRadius: BorderRadius.circular(11),
+      child: FocusRing(
+        focused: _focused,
+        radius: 11,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          decoration: BoxDecoration(
+            color: widget.filled ? AppColors.textPrimary : AppColors.charcoalLight,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                widget.icon,
+                size: 20,
+                color: widget.filled ? AppColors.charcoal : AppColors.textPrimary,
               ),
-            ),
-          ],
+              const SizedBox(width: 8),
+              Text(
+                widget.label,
+                style: TextStyle(
+                  color: widget.filled ? AppColors.charcoal : AppColors.textPrimary,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -566,7 +684,12 @@ class _CastCard extends StatelessWidget {
               width: 84,
               height: 84,
               child: url != null
-                  ? CachedNetworkImage(imageUrl: url, fit: BoxFit.cover)
+                  ? CachedNetworkImage(
+                      imageUrl: url,
+                      fit: BoxFit.cover,
+                      memCacheWidth:
+                          (84 * MediaQuery.devicePixelRatioOf(context)).round(),
+                    )
                   : Container(
                       color: AppColors.charcoalLight,
                       alignment: Alignment.center,
@@ -608,7 +731,7 @@ class _CastCard extends StatelessWidget {
   }
 }
 
-class _SeasonPill extends StatelessWidget {
+class _SeasonPill extends StatefulWidget {
   const _SeasonPill({
     required this.label,
     required this.selected,
@@ -619,24 +742,37 @@ class _SeasonPill extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
+  State<_SeasonPill> createState() => _SeasonPillState();
+}
+
+class _SeasonPillState extends State<_SeasonPill> {
+  bool _focused = false;
+
+  @override
   Widget build(BuildContext context) {
     return FocusableCard(
-      onTap: onTap,
+      onTap: widget.onTap,
       focusedScale: 1.05,
       showBorder: false,
-      borderRadius: BorderRadius.circular(20),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
-        decoration: BoxDecoration(
-          color: selected ? AppColors.textPrimary : AppColors.charcoalLight,
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: Text(
-          label,
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: selected ? AppColors.charcoal : AppColors.textSecondary,
-            fontWeight: FontWeight.w600,
+      onFocusChange: (f) => setState(() => _focused = f),
+      ensureVisibleOnFocus: true,
+      borderRadius: BorderRadius.circular(23),
+      child: FocusRing(
+        focused: _focused,
+        radius: 23,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+          decoration: BoxDecoration(
+            color: widget.selected ? AppColors.textPrimary : AppColors.charcoalLight,
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Text(
+            widget.label,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: widget.selected ? AppColors.charcoal : AppColors.textSecondary,
+              fontWeight: FontWeight.w600,
+            ),
           ),
         ),
       ),
@@ -653,15 +789,19 @@ class _EpisodeRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final still = stillUrl(episode.stillPath);
+    final comingSoon = isComingSoon(episode.airDate);
     final meta = <String>[];
     if (episode.runtime != null) meta.add('${episode.runtime}m');
-    if (episode.airDate != null) meta.add(episode.airDate!);
+    if (episode.airDate != null && episode.airDate!.isNotEmpty) {
+      meta.add(formatDate(episode.airDate));
+    }
     return Padding(
       padding: const EdgeInsets.fromLTRB(40, 0, 40, 12),
       child: FocusableCard(
         onTap: onTap,
         focusNode: focusNode,
         focusedScale: 1.02,
+        ensureVisibleOnFocus: true,
         borderRadius: BorderRadius.circular(6),
         child: Container(
           color: Colors.transparent,
@@ -675,7 +815,12 @@ class _EpisodeRow extends StatelessWidget {
                   width: 150,
                   height: 84,
                   child: still != null
-                      ? CachedNetworkImage(imageUrl: still, fit: BoxFit.cover)
+                      ? CachedNetworkImage(
+                          imageUrl: still,
+                          fit: BoxFit.cover,
+                          memCacheWidth:
+                              (150 * MediaQuery.devicePixelRatioOf(context)).round(),
+                        )
                       : Container(color: AppColors.charcoal),
                 ),
               ),
@@ -684,14 +829,24 @@ class _EpisodeRow extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      'E${episode.episodeNumber}  ·  ${episode.name ?? ''}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: AppColors.textPrimary,
-                        fontWeight: FontWeight.w600,
-                      ),
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            'E${episode.episodeNumber}  ·  ${episode.name ?? ''}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: AppColors.textPrimary,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        if (comingSoon) ...[
+                          const SizedBox(width: 8),
+                          const _ComingSoonBadge(),
+                        ],
+                      ],
                     ),
                     if (meta.isNotEmpty)
                       Text(
@@ -734,6 +889,7 @@ class _SimilarCard extends StatelessWidget {
     return FocusableCard(
       onTap: onTap,
       focusedScale: 1.04,
+      ensureVisibleOnFocus: true,
       borderRadius: BorderRadius.circular(6),
       child: Container(
         color: AppColors.charcoalLight,
@@ -743,7 +899,16 @@ class _SimilarCard extends StatelessWidget {
             AspectRatio(
               aspectRatio: 16 / 9,
               child: url != null
-                  ? CachedNetworkImage(imageUrl: url, fit: BoxFit.cover)
+                  ? LayoutBuilder(
+                      builder: (ctx, c) => CachedNetworkImage(
+                        imageUrl: url,
+                        fit: BoxFit.cover,
+                        memCacheWidth:
+                            (c.maxWidth * MediaQuery.devicePixelRatioOf(ctx))
+                                .round()
+                                .clamp(160, 780),
+                      ),
+                    )
                   : Container(color: AppColors.charcoal),
             ),
             Padding(
@@ -781,6 +946,96 @@ class _SimilarCard extends StatelessWidget {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A small amber "COMING SOON" pill for titles/episodes with a future release
+/// or air date. It's informational only — the Play button stays enabled.
+class _ComingSoonBadge extends StatelessWidget {
+  const _ComingSoonBadge({this.big = false});
+  final bool big;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: big ? 10 : 7,
+        vertical: big ? 5 : 3,
+      ),
+      decoration: BoxDecoration(
+        color: AppColors.ratingYellow,
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(
+        'COMING SOON',
+        style: TextStyle(
+          color: AppColors.charcoal,
+          fontSize: big ? 12 : 9,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.5,
+        ),
+      ),
+    );
+  }
+}
+
+/// "See More / See Previous Episodes" pager button for long episode lists.
+class _EpisodeNavButton extends StatefulWidget {
+  const _EpisodeNavButton({
+    required this.label,
+    required this.icon,
+    required this.onTap,
+  });
+  final String label;
+  final IconData icon;
+  final VoidCallback onTap;
+
+  @override
+  State<_EpisodeNavButton> createState() => _EpisodeNavButtonState();
+}
+
+class _EpisodeNavButtonState extends State<_EpisodeNavButton> {
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(40, 4, 40, 4),
+      child: FocusableCard(
+        onTap: widget.onTap,
+        focusedScale: 1.01,
+        showBorder: false,
+        ensureVisibleOnFocus: true,
+        onFocusChange: (f) => setState(() => _focused = f),
+        borderRadius: BorderRadius.circular(9),
+        child: FocusRing(
+          focused: _focused,
+          radius: 9,
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: AppColors.charcoalLight,
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(widget.icon, size: 20, color: AppColors.textPrimary),
+                const SizedBox(width: 8),
+                Text(
+                  widget.label,
+                  style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );

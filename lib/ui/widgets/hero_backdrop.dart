@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/theme.dart';
 import '../../data/models/language.dart';
+import '../../data/models/media_details.dart';
 import '../../data/models/media_item.dart';
 import '../../data/tmdb/image_urls.dart';
 
@@ -32,6 +33,12 @@ class HeroBackdrop extends StatelessWidget {
                   fit: BoxFit.cover,
                   width: double.infinity,
                   height: double.infinity,
+                  // Decode to ~display width, not the full w1280 (~3.7 MB each);
+                  // the hero swaps on every focus hop so this matters a lot.
+                  memCacheWidth:
+                      (constraints.maxWidth * 0.80 * MediaQuery.devicePixelRatioOf(context))
+                          .round()
+                          .clamp(320, 1280),
                   fadeInDuration: const Duration(milliseconds: 250),
                 ),
               ),
@@ -70,17 +77,44 @@ class HeroBackdrop extends StatelessWidget {
   }
 }
 
-/// The title/language/overview overlay for the hero. Full-width in portrait,
-/// ~48% width otherwise. Mirrors the Kotlin `HeroInfo`.
+/// The hero title + metadata + overview overlay. Full-width in portrait, ~48%
+/// otherwise. [details] (loaded lazily on focus) enriches it with the same
+/// year · rating · runtime · language · genres shown on the details page.
 class HeroInfo extends StatelessWidget {
-  const HeroInfo({super.key, required this.item, required this.portrait});
+  const HeroInfo({
+    super.key,
+    required this.item,
+    required this.portrait,
+    this.details,
+  });
   final MediaItem? item;
   final bool portrait;
+  final MediaDetails? details;
+
+  static String _fmtRuntime(int m) {
+    final h = m ~/ 60;
+    final mm = m % 60;
+    return h > 0 ? '${h}h ${mm}m' : '${mm}m';
+  }
 
   @override
   Widget build(BuildContext context) {
     final it = item;
     if (it == null) return const SizedBox.shrink();
+    final d = details;
+
+    final year = d?.year ?? it.year;
+    final rating = d?.rating ?? it.voteAverage ?? 0;
+    final runtime = d?.runtimeMinutes;
+    final language = d?.language ?? languageName(it.originalLanguage);
+    final meta = <String>[
+      if (year != null && year.isNotEmpty) year,
+      if (rating > 0) '★ ${rating.toStringAsFixed(1)}',
+      if (runtime != null && runtime > 0) _fmtRuntime(runtime),
+      if (language.isNotEmpty && language.toLowerCase() != 'unknown') language,
+    ];
+    final genres = d?.genres ?? const <String>[];
+
     return Padding(
       padding: EdgeInsets.only(left: 40, top: 40, right: portrait ? 40 : 0),
       child: Align(
@@ -102,11 +136,22 @@ class HeroInfo extends StatelessWidget {
                   fontWeight: FontWeight.bold,
                 ),
               ),
-              const SizedBox(height: 8),
-              Text(
-                'Language : ${languageName(it.originalLanguage)}',
-                style: const TextStyle(color: AppColors.textSecondary),
-              ),
+              if (meta.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(
+                  meta.join('  ·  '),
+                  style: const TextStyle(color: AppColors.textSecondary),
+                ),
+              ],
+              if (genres.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Text(
+                  genres.join('  ·  '),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: AppColors.textSecondary),
+                ),
+              ],
               const SizedBox(height: 8),
               Text(
                 it.overview ?? '',

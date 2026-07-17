@@ -8,6 +8,10 @@ class AppColors {
   static const textPrimary = Color(0xFFFFFFFF);
   static const textSecondary = Color(0xB3FFFFFF); // white 70%
   static const ratingYellow = Color(0xFFFFC107);
+
+  /// High-visibility D-pad focus ring, used across cards and player controls so
+  /// the focused element is unmistakable on a TV across the room.
+  static const focusRing = Color(0xFFFFFFFF);
 }
 
 /// Dark-only theme (the app never uses a light scheme), mirroring the Kotlin

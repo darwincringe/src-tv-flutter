@@ -13,4 +13,8 @@ String? cardBackdropUrl(String? path) => _build('w780', path);
 String? stillUrl(String? path) => _build('w300', path);
 String? profileUrl(String? path) => _build('w185', path);
 
+/// Tiny poster for list thumbnails (e.g. search rows) — a fraction of w342's
+/// bytes to fetch and decode.
+String? thumbPosterUrl(String? path) => _build('w154', path);
+
 String youTubeUrl(String key) => 'https://www.youtube.com/watch?v=$key';

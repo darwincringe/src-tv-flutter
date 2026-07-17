@@ -39,7 +39,11 @@ class PosterCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(6),
         child: AspectRatio(
           aspectRatio: 2 / 3,
-          child: PosterImage(path: item.posterPath, title: item.displayTitle),
+          child: PosterImage(
+            path: item.posterPath,
+            title: item.displayTitle,
+            displayWidth: width,
+          ),
         ),
       ),
     );
@@ -47,18 +51,31 @@ class PosterCard extends StatelessWidget {
 }
 
 /// A poster image with a graceful placeholder for missing/broken art.
+///
+/// [displayWidth] is the logical width the poster is shown at; the image is
+/// decoded to roughly that many physical pixels (memCacheWidth) instead of the
+/// full source resolution, which cuts decoded RAM dramatically on a TV.
 class PosterImage extends StatelessWidget {
-  const PosterImage({super.key, required this.path, required this.title});
+  const PosterImage({
+    super.key,
+    required this.path,
+    required this.title,
+    this.displayWidth = 130,
+  });
   final String? path;
   final String title;
+  final double displayWidth;
 
   @override
   Widget build(BuildContext context) {
     final url = posterUrl(path);
     if (url == null) return _placeholder();
+    final cacheWidth =
+        (displayWidth * MediaQuery.devicePixelRatioOf(context)).round().clamp(120, 342);
     return CachedNetworkImage(
       imageUrl: url,
       fit: BoxFit.cover,
+      memCacheWidth: cacheWidth,
       placeholder: (_, _) => Container(color: AppColors.charcoalLight),
       errorWidget: (_, _, _) => _placeholder(),
     );
