@@ -12,7 +12,7 @@ String formatDate(String? iso) {
   return '${_months[d.month - 1]} ${d.day}, ${d.year}';
 }
 
-/// Whether [iso] is a date strictly in the future — used to tag movies /
+/// Whether [iso] is a date strictly in the future — used to tag TV series /
 /// episodes as "Coming Soon".
 bool isComingSoon(String? iso) {
   if (iso == null || iso.isEmpty) return false;
@@ -21,4 +21,16 @@ bool isComingSoon(String? iso) {
   final now = DateTime.now();
   final today = DateTime(now.year, now.month, now.day);
   return d.isAfter(today);
+}
+
+/// Whether a movie release date [iso] is upcoming or released within the last
+/// 30 days — i.e. brand-new or not out yet, so likely not on streaming — and so
+/// tagged "Coming Soon". A title more than 30 days past release is not tagged.
+bool isComingSoonRelease(String? iso) {
+  if (iso == null || iso.isEmpty) return false;
+  final d = DateTime.tryParse(iso);
+  if (d == null) return false;
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  return d.add(const Duration(days: 30)).isAfter(today);
 }

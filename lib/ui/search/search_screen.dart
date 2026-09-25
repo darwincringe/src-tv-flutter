@@ -11,6 +11,7 @@ import '../../data/models/media_item.dart';
 import '../../data/repository/media_repository.dart';
 import '../../data/store/recommendation_seeds.dart';
 import '../../data/tmdb/image_urls.dart';
+import '../widgets/coming_soon_badge.dart';
 
 enum _Status { idle, loading, empty, error, results }
 
@@ -225,12 +226,24 @@ class _SuggestionRow extends StatelessWidget {
                       fontWeight: FontWeight.w600,
                     ),
                   ),
-                  Text(
-                    subtitle,
-                    style: const TextStyle(
-                      color: AppColors.textSecondary,
-                      fontSize: 12,
-                    ),
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          subtitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: AppColors.textSecondary,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                      if (item.comingSoon) ...[
+                        const SizedBox(width: 8),
+                        const ComingSoonBadge(),
+                      ],
+                    ],
                   ),
                 ],
               ),

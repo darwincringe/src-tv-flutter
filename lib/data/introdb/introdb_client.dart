@@ -1,4 +1,7 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
+
+import '../stream/stream_client.dart';
 
 /// A timed segment of an episode (recap / intro / outro), in milliseconds.
 class Segment {
@@ -24,7 +27,11 @@ class IntroDbClient {
   IntroDbClient([Dio? dio]) : _dio = dio ?? Dio();
   final Dio _dio;
 
-  static const _base = 'https://api.introdb.app/segments';
+  // introdb.app only sends CORS for its own origin, so a browser can't call it
+  // directly — on web, go through our backend proxy (open CORS). Native calls
+  // introdb directly.
+  static const _direct = 'https://api.introdb.app/segments';
+  static String get _base => kIsWeb ? '${StreamClient.baseUrl}segments' : _direct;
 
   Future<MediaSegments?> segments(
     String imdbId,

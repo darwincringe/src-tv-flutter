@@ -195,14 +195,8 @@ class MediaRepository {
       d = _tvToDetails(dto, comingSoon: isComingSoon(dto.firstAirDate));
     } else {
       final dto = await _api.movieDetails(id);
-      // "Coming Soon" for movies = TMDB lists no watch provider in our region.
-      var comingSoon = false;
-      try {
-        comingSoon = !(await _api.movieHasProviders(id, region));
-      } catch (_) {
-        comingSoon = false; // never falsely tag on a failed lookup
-      }
-      d = _movieToDetails(dto, comingSoon: comingSoon);
+      // "Coming Soon" for movies = upcoming or released within the last 30 days.
+      d = _movieToDetails(dto, comingSoon: isComingSoonRelease(dto.releaseDate));
     }
     _detailsCache[key] = d;
     return d;
@@ -377,28 +371,26 @@ class MediaRepository {
     final progs = WatchProgressStore.all()
         .where((p) => p.completed || p.isResumable || p.type == 'tv')
         .toList();
-    final out = <WatchProgress>[];
-    for (final p in progs) {
-      final hasInfo = (p.title?.isNotEmpty ?? false) &&
-          (p.posterPath?.isNotEmpty ?? false);
-      if (hasInfo) {
-        out.add(p);
-        continue;
-      }
-      // Enrich missing title/poster from details, but never drop a continuable
-      // entry just because the details fetch failed.
+    // Always prefer the TMDB poster (portrait key art with the title on it):
+    // some stored records carry a backdrop/hero path, which shows up in the row
+    // as a title-less image. details() is cached, so this is cheap on repeat
+    // loads; fetch concurrently so a cold load is ~one round-trip, not N.
+    return Future.wait(progs.map((p) async {
       try {
         final d = await details(p.type, p.tmdbId);
-        out.add(p.copyWith(
+        return p.copyWith(
           title: (p.title?.isNotEmpty ?? false) ? p.title : d.title,
-          posterPath:
-              (p.posterPath?.isNotEmpty ?? false) ? p.posterPath : d.posterPath,
-        ));
+          // d.posterPath is the titled poster; only fall back to the stored
+          // path when TMDB has none, so we never drop the image entirely.
+          posterPath: (d.posterPath?.isNotEmpty ?? false)
+              ? d.posterPath
+              : p.posterPath,
+        );
       } catch (_) {
-        out.add(p);
+        // Never drop a continuable entry just because details failed.
+        return p;
       }
-    }
-    return out;
+    }));
   }
 }
 

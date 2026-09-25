@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:better_player_plus/better_player_plus.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -18,7 +19,6 @@ import '../../data/store/subtitle_pref.dart';
 import '../../data/store/watch_progress.dart';
 import '../../data/tmdb/image_urls.dart';
 import '../../data/youtube/youtube_extractor.dart';
-import '../widgets/branded_loader.dart';
 import 'player_args.dart';
 import 'subtitle_config.dart';
 import 'subtitle_parser.dart';
@@ -43,7 +43,7 @@ class PlayerScreen extends ConsumerStatefulWidget {
 class _PlayerScreenState extends ConsumerState<PlayerScreen>
     with WidgetsBindingObserver {
   static const int _maxRetries = 4;
-  static const int _seekStepMs = 30000;
+  static const int _seekStepMs = 15000;
   static const String _userAgent =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/120.0 Safari/537.36';
@@ -65,7 +65,20 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   String? _mediaTitle;
   String? _episodeName;
   String? _posterPath;
+  String? _backdropPath; // shown on the loading screen (hero-style)
+  // The current episode's still image — preferred on the loading screen for TV
+  // episodes (so each episode shows its own banner), falling back to the series
+  // backdrop when the episode has no still.
+  String? _episodeStillPath;
+  // Keep the loading banner+spinner up until at least this epoch-ms. Set when
+  // jumping to another episode (Next/Prev) so the new episode's banner is
+  // actually visible even when it buffers in well under a second.
+  int _minLoaderUntilMs = 0;
   bool _isTv = false;
+
+  // Loading-screen progress (0..100), animated up while buffering.
+  double _loadProgress = 0;
+  Timer? _loadTimer;
   List<Season> _seasons = [];
   _EpisodeRef? _nextRef;
   _EpisodeRef? _prevRef;
@@ -80,15 +93,24 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   int _subLoadToken = 0; // guards against a stale async load winning
   int _resumeTargetMs = 0;
   bool _resumeDone = true;
+  int _resumeSeekAtMs = 0; // when the resume seek was issued (reveal fallback)
   int _retryCount = 0;
 
   // UI state
   bool _loading = true;
+  // A mid-playback rebuffer (distinct from the initial load). Shows the episode
+  // banner + spinner + "Buffering", covering the frozen frame; ExoPlayer holds
+  // playback until it has buffered a stable amount, then auto-resumes.
+  bool _buffering = false;
+  Timer? _bufferDebounce; // ignore momentary buffer blips before showing it
   String? _errorMsg;
   bool _showControls = true;
   bool _playing = false;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
+  // How far the stream is buffered ahead (0..1 of the duration), shown as a
+  // lighter track behind the played portion of the seek bar.
+  double _bufferedFraction = 0;
 
   // Recap/intro/outro timings (introdb) for the current TV episode, and the
   // currently-applicable action ('recap' | 'intro' | 'next' | null) which
@@ -108,6 +130,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   bool _scrubbing = false; // seek-bar "scrub mode" active
   int _scrubPreviewMs = 0; // marker position while scrubbing (not yet applied)
   bool _wasPlayingBeforeScrub = false;
+  bool _leaving = false; // user confirmed exit — suppress lifecycle re-saves
+  bool _disposed = false; // set in dispose — suppress late events/setState
+  bool _backgrounded = false; // app not foregrounded — never let audio play
   String? _subtitleText; // current subtitle, rendered by our own overlay
 
   int get _now => DateTime.now().millisecondsSinceEpoch;
@@ -125,6 +150,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _season = a.season;
     _episode = a.episode;
     _trailerKey = a.trailerKey;
+    _backdropPath = a.backdropPath; // show it on the loader immediately (0%)
 
     _resolveAndPlay();
   }
@@ -133,7 +159,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     return BetterPlayerController(
       BetterPlayerConfiguration(
         fit: BoxFit.contain,
-        autoPlay: true,
+        // autoPlay MUST stay false: with autoPlay:true, backing out while the
+        // HLS source is still preparing lets better_player start playback on its
+        // own when setup finishes (a few seconds later) — audio playing on a
+        // screen the user already left. We start playback ourselves, only from
+        // the initialized handler / tick, which both bail when _disposed.
+        autoPlay: false,
         handleLifecycle: false,
         autoDispose: false,
         expandToFill: true,
@@ -155,13 +186,40 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   void _onEvent(BetterPlayerEvent event) {
+    // Disposing the controller emits final events synchronously; ignore them so
+    // we never setState on a defunct element (mounted can still be true here).
+    if (_disposed) return;
     switch (event.betterPlayerEventType) {
       case BetterPlayerEventType.initialized:
         _retryCount = 0;
+        // Keep muted while a resume seek is still pending (see _resolveStream).
+        if (_resumeTargetMs > 0 && !_resumeDone) {
+          _controller?.setVolume(0);
+        }
         // Don't seek here — seeking right after init stalls ExoPlayer. The
         // resume seek is applied from the tick once playback is advancing.
-        _controller?.play();
-        if (mounted) setState(() => _loading = false);
+        // Hold on the loading banner (paused, but still buffering, so no audio
+        // plays behind it) until the minimum banner time has passed. The tick
+        // starts playback and lifts the loader once we're past that time and,
+        // if resuming, the seek has landed.
+        //
+        // Exception: when resuming, we must start playback now (muted) even
+        // inside the banner window — the resume seek only fires once the
+        // position is advancing, so a paused player would sit at 0 forever.
+        if (_now < _minLoaderUntilMs && _resumeTargetMs <= 0) {
+          _controller?.pause();
+        } else {
+          _controller?.play();
+          // If resuming, KEEP the loader up until the seek lands (so the
+          // opening never plays on screen — seamless resume). Otherwise lift.
+          if (_resumeTargetMs <= 0) {
+            // Not resuming: make sure audio is on (the controller is reused
+            // across episodes and could be left muted by a prior resume).
+            _controller?.setVolume(1.0);
+            _loadTimer?.cancel();
+            if (mounted) setState(() => _loading = false);
+          }
+        }
         _startTick();
         break;
       case BetterPlayerEventType.play:
@@ -184,6 +242,24 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       case BetterPlayerEventType.finished:
         _onCompleted();
         break;
+      case BetterPlayerEventType.bufferingStart:
+        // A rebuffer mid-playback (not the initial load, which _loading covers).
+        // Debounced so a momentary blip doesn't flash the overlay.
+        if (!_loading && !_disposed) {
+          _bufferDebounce?.cancel();
+          _bufferDebounce = Timer(const Duration(milliseconds: 400), () {
+            if (mounted && !_loading && !_disposed) {
+              setState(() => _buffering = true);
+            }
+          });
+        }
+        break;
+      case BetterPlayerEventType.bufferingEnd:
+        // Enough is buffered to play smoothly — hide the banner; ExoPlayer
+        // resumes on its own (STATE_READY).
+        _bufferDebounce?.cancel();
+        if (_buffering && mounted) setState(() => _buffering = false);
+        break;
       case BetterPlayerEventType.exception:
         _retryOrError('Playback error');
         break;
@@ -194,11 +270,29 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   // ---- Resolve + play ----------------------------------------------------
 
+  // Animate the loading % up while buffering (eases toward ~96% and stops; the
+  // real buffered fraction isn't reliably available before init on ExoPlayer).
+  void _startLoadProgress() {
+    _loadProgress = 0;
+    _loadTimer?.cancel();
+    _loadTimer = Timer.periodic(const Duration(milliseconds: 180), (_) {
+      if (!mounted || !_loading) {
+        _loadTimer?.cancel();
+        return;
+      }
+      setState(() {
+        _loadProgress += (96 - _loadProgress) * 0.10;
+        if (_loadProgress > 96) _loadProgress = 96;
+      });
+    });
+  }
+
   Future<void> _resolveAndPlay() async {
     setState(() {
       _loading = true;
       _errorMsg = null;
     });
+    _startLoadProgress();
     if (_mode == PlayerMode.trailer) {
       await _resolveTrailer();
     } else {
@@ -231,6 +325,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   Future<void> _resolveStream() async {
+    if (_disposed) return;
     try {
       final repo = ref.read(mediaRepositoryProvider);
       final res = await repo.streamSource(
@@ -249,15 +344,20 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           final d = await repo.details(_type, _tmdbId);
           _mediaTitle = d.title;
           _posterPath = d.posterPath;
+          _backdropPath = d.backdropPath;
           _isTv = d.isTv;
           _seasons = d.seasons;
+          if (mounted) setState(() {}); // show the backdrop on the loader
         } catch (_) {}
       }
       if (_type == 'tv' && _episode != null) {
         try {
           final eps = await repo.episodes(_tmdbId, _season ?? 1);
-          _episodeName =
-              eps.firstWhere((e) => e.episodeNumber == _episode).name;
+          final match = eps.where((e) => e.episodeNumber == _episode);
+          _episodeName = match.isNotEmpty ? match.first.name : null;
+          // Prefer this episode's own still on the loading screen.
+          _episodeStillPath = match.isNotEmpty ? match.first.stillPath : null;
+          if (mounted) setState(() {}); // swap the loader to the episode banner
         } catch (_) {
           _episodeName = null;
         }
@@ -281,16 +381,36 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           // by better_player — its SRT parser crashes on 3+ line cues.
           useAsmsSubtitles: false,
           useAsmsTracks: true,
-          // Bound the buffer so each play uses far less heap; the default
-          // (~50s) piled up across movies and OOM-crashed WSA's small heap.
+          // Buffer far ahead (target ~10 min) so a shaky source (e.g. The
+          // Office S4E8) rides through stalls; after a rebuffer, wait for a
+          // solid ~12s cushion before resuming so it doesn't immediately stall
+          // again. The time target is bounded by an 80 MB byte cap in the
+          // vendored player's LoadControl (see BetterPlayer.kt) because the
+          // buffer lives in the Java heap and would otherwise OOM the box: full
+          // 10 min at lower bitrates, ~2 min at 1080p, whichever hits 80 MB.
           bufferingConfiguration: const BetterPlayerBufferingConfiguration(
-            minBufferMs: 15000,
-            maxBufferMs: 30000,
-            bufferForPlaybackMs: 2500,
-            bufferForPlaybackAfterRebufferMs: 5000,
+            minBufferMs: 120000,
+            maxBufferMs: 600000,
+            bufferForPlaybackMs: 3000,
+            bufferForPlaybackAfterRebufferMs: 12000,
           ),
         ),
       );
+      // If the user backed out while the source was still preparing, tear the
+      // controller down here and don't start anything — otherwise it would sit
+      // ready and (previously) auto-play on a screen that no longer exists.
+      if (_disposed) {
+        _controller?.pause();
+        _controller?.dispose(forceDispose: true);
+        return;
+      }
+      // Seamless resume: silence playback from the very start so the opening
+      // that would otherwise play before the tick seeks to the saved position is
+      // never heard (the loader already hides the video). Unmuted the instant
+      // the seek lands on the resume point.
+      if (_resumeTargetMs > 0) {
+        await _controller?.setVolume(0);
+      }
     } catch (_) {
       _retryOrError('Playback error');
     }
@@ -341,7 +461,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (index < 0) {
       if (mounted) setState(() => _cues = []);
       if (remember) {
-        SubtitlePrefStore.save(
+        await SubtitlePrefStore.save(
             _type, _tmdbId, _season, const SubtitlePref(off: true));
       }
       return;
@@ -349,8 +469,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (index >= _subOptions.length) return;
     final opt = _subOptions[index];
     if (remember) {
-      SubtitlePrefStore.save(_type, _tmdbId, _season,
-          SubtitlePref(name: opt.label, language: opt.language));
+      await SubtitlePrefStore.save(
+          _type,
+          _tmdbId,
+          _season,
+          SubtitlePref(name: opt.label, language: subtitlePrefLanguage(opt)));
     }
     // The subtitle host (OpenSubtitles) intermittently rate-limits back-to-back
     // requests — especially right after auto-advancing an episode — so a single
@@ -375,19 +498,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   /// language), else English (case-insensitive), else the first track. Returns
   /// -1 if the user previously turned subtitles off.
   int _defaultSubtitleIndex(List<SubtitleOption> opts) {
-    final pref = SubtitlePrefStore.get(_type, _tmdbId, _season);
-    if (pref?.off ?? false) return -1;
-    if (pref != null) {
-      if (pref.name != null) {
-        final i = opts.indexWhere(
-            (o) => o.label.toLowerCase() == pref.name!.toLowerCase());
-        if (i >= 0) return i;
-      }
-      if (pref.language != null) {
-        final i = opts.indexWhere((o) => (o.language ?? '') == pref.language);
-        if (i >= 0) return i;
-      }
-    }
+    final remembered = rememberedSubtitleIndex(
+      opts,
+      SubtitlePrefStore.get(_type, _tmdbId, _season),
+    );
+    if (remembered != null) return remembered;
     final en = opts.indexWhere((o) {
       final lang = (o.language ?? '').toLowerCase();
       final label = o.label.toLowerCase();
@@ -547,6 +662,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       _season = ref.season;
       _episode = ref.episode;
       _episodeName = null;
+      // Show the loading screen right away (over the paused last frame) and
+      // drop the previous episode's still so we don't show its banner for the
+      // new one — the series backdrop shows until the new still is fetched.
+      _loading = true;
+      _loadProgress = 0;
+      _episodeStillPath = null;
+      // Hold the banner + spinner for at least 5s so it's clearly "loading the
+      // next episode" instead of the button flashing straight into playback.
+      _minLoaderUntilMs = _now + 5000;
       _retryCount = 0;
       _cues = []; // drop the previous episode's subtitles immediately
       _segments = null; // and its recap/intro/outro timings
@@ -592,17 +716,52 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       if (v == null || !v.initialized) return;
       _position = v.position;
       _duration = v.duration ?? Duration.zero;
-      // Apply the resume seek only once playback is genuinely advancing;
-      // seeking earlier (on init) stalls ExoPlayer. This is the same path as a
-      // manual seek, which works reliably.
-      if (!_resumeDone &&
-          _resumeTargetMs > 0 &&
-          _position.inMilliseconds >= 800) {
-        final target = _resumeTargetMs;
-        _resumeTargetMs = 0;
-        _resumeDone = true;
-        _controller?.seekTo(Duration(milliseconds: target));
-        _controller?.play();
+      // Furthest buffered point (across ranges) as a fraction of the duration.
+      final durMs0 = _duration.inMilliseconds;
+      if (durMs0 > 0 && v.buffered.isNotEmpty) {
+        final endMs = v.buffered
+            .map((r) => r.end.inMilliseconds)
+            .reduce((a, b) => a > b ? a : b);
+        _bufferedFraction = (endMs / durMs0).clamp(0.0, 1.0);
+      } else {
+        _bufferedFraction = 0;
+      }
+      // Skip all auto-play while backgrounded so a video never starts (or
+      // resumes) audio when the app isn't on screen. Deferred to the next tick
+      // once foregrounded.
+      if (!_backgrounded) {
+        // Apply the resume seek only once playback is genuinely advancing;
+        // seeking earlier (on init) stalls ExoPlayer. This is the same path as
+        // a manual seek, which works reliably.
+        if (!_resumeDone &&
+            _resumeTargetMs > 0 &&
+            _position.inMilliseconds >= 800) {
+          _resumeDone = true;
+          _resumeSeekAtMs = _now;
+          _controller?.seekTo(Duration(milliseconds: _resumeTargetMs));
+          _controller?.play();
+        }
+        // Keep the loader up during a resume until playback has actually
+        // ADVANCED past the saved position — not merely until the seek is
+        // requested. `position` jumps to the target the instant seekTo is
+        // called, but the decoded frame on screen is still the opening until
+        // the target HLS segment loads; revealing then flashes the beginning.
+        // Waiting for position > target proves the target frame is live. A 6s
+        // fallback avoids a stuck loader if position reporting misbehaves.
+        if (_loading && _resumeDone) {
+          final landed = _resumeTargetMs <= 0 ||
+              _position.inMilliseconds >= _resumeTargetMs + 250 ||
+              (_resumeSeekAtMs > 0 && _now - _resumeSeekAtMs > 6000);
+          if (landed && _now >= _minLoaderUntilMs) {
+            _loadTimer?.cancel();
+            // We're now sitting on the resume point with the video about to be
+            // revealed — restore audio (muted since setup) so sound and picture
+            // start together, then play and lift the loader.
+            _controller?.setVolume(1.0);
+            _controller?.play(); // start playback we held during the min window
+            if (mounted) setState(() => _loading = false);
+          }
+        }
       }
       final action = _computeActionKind();
       final actionChanged = action != _actionKind;
@@ -697,7 +856,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     final pos = _position.inMilliseconds;
     final dur = _duration.inMilliseconds;
     if (dur <= 0) return;
-    if (pos >= _completionThresholdMs()) {
+    // If we're already at/after the credits (the "Next Episode" affordance is
+    // showing, or we've passed the completion point), treat the episode as done
+    // so resuming later starts the NEXT episode — not this one from the top.
+    if (_actionKind == 'next' || pos >= _completionThresholdMs()) {
       _markReachedEnd();
       return;
     }
@@ -873,17 +1035,27 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive) {
-      _saveProgress();
-      if (_mode == PlayerMode.stream) {
-        ActivePlayback.save(
-          tmdbId: _tmdbId,
-          type: _type,
-          season: _season,
-          episode: _episode,
-        );
-      }
+    // The player runs with handleLifecycle:false (we manage it ourselves), so
+    // nothing pauses the native ExoPlayer on background. Pause it explicitly the
+    // moment the app leaves the foreground, otherwise audio keeps playing behind
+    // whatever's on top. _backgrounded also stops the tick from auto-resuming.
+    if (state == AppLifecycleState.resumed) {
+      _backgrounded = false;
+      return;
+    }
+    _backgrounded = true;
+    _controller?.pause();
+    // While leaving, don't re-arm ActivePlayback (a transient inactive during
+    // the exit dialog/pop would otherwise trigger auto-resume → a 2nd player).
+    if (_leaving) return;
+    _saveProgress();
+    if (_mode == PlayerMode.stream) {
+      ActivePlayback.save(
+        tmdbId: _tmdbId,
+        type: _type,
+        season: _season,
+        episode: _episode,
+      );
     }
   }
 
@@ -911,6 +1083,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       ),
     );
     if (leave == true) {
+      // Mark leaving first so no lifecycle event re-saves ActivePlayback, stop
+      // audio immediately, persist progress, and clear the resume pointer.
+      _leaving = true;
+      PlayerRuntime.leftAt = _now;
+      _controller?.pause();
       _saveProgress();
       ActivePlayback.clear();
       return true;
@@ -921,11 +1098,22 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   @override
   void dispose() {
+    _disposed = true;
     PlayerRuntime.isOpen = false;
     _tick?.cancel();
     _hideTimer?.cancel();
+    _loadTimer?.cancel();
+    _bufferDebounce?.cancel();
     _saveProgress();
-    _controller?.dispose();
+    // Detach our listener before teardown so the controller's final events
+    // don't call back into this (now-defunct) State.
+    _controller?.removeEventsListener(_onEvent);
+    _controller?.pause(); // stop audio immediately, before teardown
+    // forceDispose is REQUIRED: the config sets autoDispose:false, so a plain
+    // dispose() early-returns without releasing the native ExoPlayer — it would
+    // keep playing audio in the background and leak ~80 MB. forceDispose tears
+    // the player down for real.
+    _controller?.dispose(forceDispose: true);
     _rootScope.dispose();
     _playPauseFocus.dispose();
     _seekFocus.dispose();
@@ -961,6 +1149,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           // when focus has fallen back to this scope.
           onKeyEvent: (node, event) {
             if (event is! KeyDownEvent) return KeyEventResult.ignored;
+            // During the error screen (or while loading), don't intercept — let
+            // the Retry / Open-in-YouTube button receive D-pad focus + OK.
+            if (_errorMsg != null || _loading) return KeyEventResult.ignored;
             if (!_showControls) {
               // If a Skip Recap / Skip Intro / Next Episode button is showing,
               // it's focused — let the OK/Select key activate IT instead of
@@ -998,20 +1189,105 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                 if (_controller != null)
                   BetterPlayer(controller: _controller!),
                 _subtitleOverlay(),
-                // While buffering, show ONLY the branded loader (logo + white
-                // spinner) on black — no transport controls.
-                if (_loading)
-                  const Positioned.fill(
-                    child: BrandedLoader(compact: true, background: Colors.black),
-                  ),
+                // While loading OR rebuffering, show ONLY the banner screen
+                // (episode/series art fading to black + spinner) — no controls.
+                if (_loading || _buffering)
+                  Positioned.fill(child: _loadingOverlay()),
                 if (_errorMsg != null) _errorView(),
-                if (_errorMsg == null && _showControls && !_loading)
+                if (_errorMsg == null && _showControls && !_loading && !_buffering)
                   _controlsOverlay(),
-                if (_errorMsg == null && !_loading) _segmentActionOverlay(),
+                if (_errorMsg == null && !_loading && !_buffering)
+                  _segmentActionOverlay(),
               ],
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  /// Loading screen: the content backdrop, radially masked so it stays bright
+  /// toward the top-right and fades smoothly into black on all sides (round, no
+  /// straight/cut edges), with a % ring over a soft radial shadow.
+  Widget _loadingOverlay() {
+    // Episode still (rendered at backdrop size) if we have one, else the series
+    // backdrop.
+    final url = backdropUrl(_episodeStillPath ?? _backdropPath);
+    final pct = _loadProgress.round();
+    // Mid-playback rebuffer → indeterminate spinner + "Buffering"; initial load
+    // → determinate % ring.
+    final isBuffering = _buffering && !_loading;
+    return LayoutBuilder(
+      builder: (context, c) => Stack(
+        fit: StackFit.expand,
+        children: [
+          const ColoredBox(color: Colors.black),
+          if (url != null)
+            Positioned.fill(
+              child: ShaderMask(
+                blendMode: BlendMode.dstIn,
+                shaderCallback: (rect) => const RadialGradient(
+                  center: Alignment(0.55, -0.35), // bright toward top-right
+                  radius: 1.05,
+                  colors: [Colors.white, Colors.white, Color(0x00FFFFFF)],
+                  stops: [0.0, 0.4, 0.95],
+                ).createShader(rect),
+                child: CachedNetworkImage(
+                  imageUrl: url,
+                  fit: BoxFit.cover,
+                  alignment: Alignment.topRight,
+                  memCacheWidth:
+                      (c.maxWidth * MediaQuery.devicePixelRatioOf(context))
+                          .round()
+                          .clamp(320, 1280),
+                ),
+              ),
+            ),
+          Center(
+            child: Container(
+              width: 150,
+              height: 150,
+              alignment: Alignment.center,
+              // Soft radial shadow (fades out — no hard disc edge).
+              decoration: const BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: RadialGradient(
+                  colors: [Color(0xA6000000), Color(0x00000000)],
+                  stops: [0.3, 1.0],
+                ),
+              ),
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  SizedBox(
+                    width: 76,
+                    height: 76,
+                    child: CircularProgressIndicator(
+                      // Indeterminate while rebuffering (no meaningful %).
+                      value: isBuffering
+                          ? null
+                          : (_loadProgress / 100).clamp(0.0, 1.0),
+                      color: Colors.white,
+                      backgroundColor: Colors.white24,
+                      strokeWidth: 4,
+                    ),
+                  ),
+                  Text(
+                    isBuffering ? 'Buffering' : '$pct%',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: isBuffering ? 13 : 20,
+                      fontWeight: FontWeight.w700,
+                      shadows: const [
+                        Shadow(color: Colors.black, blurRadius: 8),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1024,15 +1300,18 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     // box, so a fixed 50px looked correct on the emulator but was giant on the
     // TV. 0.026 * 1920 = 50 (unchanged on the 1920-logical emulator).
     final width = MediaQuery.of(context).size.width;
-    final fontSize = (width * 0.04).clamp(24.0, 54.0);
+    // A touch smaller than before on the TV's logical width.
+    final fontSize = (width * 0.032).clamp(20.0, 44.0);
     final baseStyle = TextStyle(
       color: Colors.white,
       fontSize: fontSize,
       fontWeight: FontWeight.w700,
       height: 1.2,
+      // Layered soft shadow (a wider halo, not a darker box) so the text stays
+      // readable even over on-screen text / bright scenes.
       shadows: const [
-        // Single clean drop shadow, matching the native app (not a heavy halo).
-        Shadow(offset: Offset(0, 2), blurRadius: 4, color: Color(0xCC000000)),
+        Shadow(offset: Offset(0, 1), blurRadius: 6, color: Color(0xCC000000)),
+        Shadow(offset: Offset(0, 0), blurRadius: 14, color: Color(0x99000000)),
       ],
     );
     return Positioned(
@@ -1094,25 +1373,42 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   Widget _errorView() {
     final isTrailer = _mode == PlayerMode.trailer;
+    final openYt = isTrailer && _trailerKey != null;
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(_errorMsg!,
               style: const TextStyle(color: Colors.white, fontSize: 16)),
-          const SizedBox(height: 16),
-          FilledButton(
-            onPressed: () {
-              if (isTrailer && _trailerKey != null) {
-                launchUrl(Uri.parse(youTubeUrl(_trailerKey!)),
-                    mode: LaunchMode.externalApplication);
-              } else {
-                _retryCount = 0;
-                _resolveAndPlay();
-              }
-            },
-            child: Text(
-                isTrailer && _trailerKey != null ? 'Open in YouTube' : 'Retry'),
+          const SizedBox(height: 20),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Focusable + autofocused so the D-pad can activate it.
+              _DialogButton(
+                label: openYt ? 'Open in YouTube' : 'Retry',
+                autofocus: true,
+                onTap: () {
+                  if (openYt) {
+                    launchUrl(Uri.parse(youTubeUrl(_trailerKey!)),
+                        mode: LaunchMode.externalApplication);
+                  } else {
+                    _retryCount = 0;
+                    _resolveAndPlay();
+                  }
+                },
+              ),
+              const SizedBox(width: 12),
+              _DialogButton(
+                label: 'Back',
+                onTap: () {
+                  _leaving = true;
+                  PlayerRuntime.leftAt = _now;
+                  ActivePlayback.clear();
+                  if (mounted) context.pop();
+                },
+              ),
+            ],
           ),
         ],
       ),
@@ -1193,8 +1489,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                 const SizedBox(width: 14),
               ],
               _FocusIconButton(
-                key: const ValueKey('replay30'),
-                icon: Icons.replay_30,
+                key: const ValueKey('replay15'),
+                icon: Icons.replay,
+                label: '15',
+                spinOnTap: -1.0, // rewind: spin left, back to place
                 onTap: () => _seekBy(-_seekStepMs),
               ),
               const SizedBox(width: 14),
@@ -1208,8 +1506,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
               ),
               const SizedBox(width: 14),
               _FocusIconButton(
-                key: const ValueKey('forward30'),
-                icon: Icons.forward_30,
+                key: const ValueKey('forward15'),
+                icon: Icons.replay,
+                label: '15',
+                flipHorizontally: true, // mirror → clockwise "forward" arrow
+                spinOnTap: 1.0, // forward: spin right, back to place
                 onTap: () => _seekBy(_seekStepMs),
               ),
               if (isStream && _nextRef != null) ...[
@@ -1241,6 +1542,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                     child: _SeekBar(
                       position: displayPos,
                       duration: _duration,
+                      buffered: _bufferedFraction,
                       focusNode: _seekFocus,
                       scrubbing: _scrubbing,
                       onEnterScrub: _enterScrub,
@@ -1420,6 +1722,9 @@ class _FocusIconButton extends StatefulWidget {
     this.size = 40,
     this.focusNode,
     this.autofocus = false,
+    this.spinOnTap = 0.0,
+    this.label,
+    this.flipHorizontally = false,
   });
   final IconData icon;
   final VoidCallback onTap;
@@ -1427,12 +1732,25 @@ class _FocusIconButton extends StatefulWidget {
   final FocusNode? focusNode;
   final bool autofocus;
 
+  /// Full turns to spin the icon on tap (e.g. +1 = one clockwise spin for +15s,
+  /// -1 = counter-clockwise for -15s). 0 = no spin.
+  final double spinOnTap;
+
+  /// Small number drawn in the middle of the icon (e.g. "15" for the ±15s skip
+  /// buttons — Material has no replay_15/forward_15 glyph, so we overlay it on a
+  /// plain circular arrow).
+  final String? label;
+
+  /// Mirror the icon horizontally — turns the counter-clockwise `Icons.replay`
+  /// arrow into a clockwise "forward" arrow for the +15s button.
+  final bool flipHorizontally;
+
   @override
   State<_FocusIconButton> createState() => _FocusIconButtonState();
 }
 
 class _FocusIconButtonState extends State<_FocusIconButton>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   bool _focused = false;
 
   // A quick "blink"/pulse played on every activation (D-pad OK or tap): the
@@ -1446,19 +1764,65 @@ class _FocusIconButtonState extends State<_FocusIconButton>
     TweenSequenceItem(tween: Tween(begin: 0.82, end: 1.0), weight: 1),
   ]).animate(CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeOut));
 
+  // A smooth one-turn spin on tap (direction from spinOnTap); ends back at 0.
+  late final AnimationController _spinCtrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 450),
+  );
+  late final Animation<double> _spin = Tween<double>(
+    begin: 0,
+    end: widget.spinOnTap,
+  ).animate(CurvedAnimation(parent: _spinCtrl, curve: Curves.easeInOut));
+
   @override
   void dispose() {
     _pulseCtrl.dispose();
+    _spinCtrl.dispose();
     super.dispose();
   }
 
   void _handleActivate() {
     widget.onTap();
     _pulseCtrl.forward(from: 0);
+    if (widget.spinOnTap != 0) _spinCtrl.forward(from: 0);
   }
 
   @override
   Widget build(BuildContext context) {
+    const iconShadow = [Shadow(color: Color(0xB3000000), blurRadius: 10)];
+    Widget arrow = Icon(
+      widget.icon,
+      color: Colors.white,
+      size: widget.size * 0.7,
+      // Soft shadow so the white icon stays legible over bright video.
+      shadows: iconShadow,
+    );
+    if (widget.flipHorizontally) {
+      arrow = Transform.flip(flipX: true, child: arrow);
+    }
+    Widget icon = widget.label == null
+        ? arrow
+        : Stack(
+            alignment: Alignment.center,
+            children: [
+              arrow,
+              // Number sits in the open centre of the circular arrow; kept out
+              // of the flip so "15" is never mirrored.
+              Text(
+                widget.label!,
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: widget.size * 0.26,
+                  fontWeight: FontWeight.bold,
+                  height: 1.0,
+                  shadows: iconShadow,
+                ),
+              ),
+            ],
+          );
+    if (widget.spinOnTap != 0) {
+      icon = RotationTransition(turns: _spin, child: icon);
+    }
     return FocusableActionDetector(
       focusNode: widget.focusNode,
       autofocus: widget.autofocus,
@@ -1491,15 +1855,7 @@ class _FocusIconButtonState extends State<_FocusIconButton>
                     ? Border.all(color: Colors.white, width: 2.5)
                     : null,
               ),
-              child: Icon(
-                widget.icon,
-                color: Colors.white,
-                size: widget.size * 0.7,
-                // Soft shadow so the white icon stays legible over bright video.
-                shadows: const [
-                  Shadow(color: Color(0xB3000000), blurRadius: 10),
-                ],
-              ),
+              child: icon,
             ),
           ),
         ),
@@ -1641,6 +1997,7 @@ class _SeekBar extends StatefulWidget {
   const _SeekBar({
     required this.position,
     required this.duration,
+    required this.buffered,
     required this.focusNode,
     required this.scrubbing,
     required this.onEnterScrub,
@@ -1655,6 +2012,7 @@ class _SeekBar extends StatefulWidget {
 
   final Duration position;
   final Duration duration;
+  final double buffered; // buffered-ahead fraction (0..1)
   final FocusNode focusNode;
   final bool scrubbing;
   final VoidCallback onEnterScrub;
@@ -1692,11 +2050,11 @@ class _SeekBarState extends State<_SeekBar> {
     if (widget.scrubbing) {
       // Left/Right seek on press AND while held; consumed so focus never moves.
       if (k == LogicalKeyboardKey.arrowLeft) {
-        widget.onSeekStep(-30000);
+        widget.onSeekStep(-15000);
         return KeyEventResult.handled;
       }
       if (k == LogicalKeyboardKey.arrowRight) {
-        widget.onSeekStep(30000);
+        widget.onSeekStep(15000);
         return KeyEventResult.handled;
       }
       if (isDown) {
@@ -1782,6 +2140,15 @@ class _SeekBarState extends State<_SeekBar> {
                     height: barHeight,
                     decoration: BoxDecoration(
                       color: Colors.white24,
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                  ),
+                  // Buffered-ahead track (lighter than the played track).
+                  Container(
+                    width: w * widget.buffered.clamp(0.0, 1.0),
+                    height: barHeight,
+                    decoration: BoxDecoration(
+                      color: Colors.white54,
                       borderRadius: BorderRadius.circular(3),
                     ),
                   ),

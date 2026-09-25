@@ -4,13 +4,15 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/theme.dart';
 
-/// Navigation items, top-to-bottom / left-to-right, matching the Kotlin
-/// `RailItem` order: Search, Home, Movies, TV Series, Settings.
+/// Navigation items, top-to-bottom / left-to-right. Order must match the router
+/// branch order in `router.dart`: Search, Home, Movies, TV Series, Library,
+/// Settings.
 const _navItems = <_NavSpec>[
   _NavSpec(Icons.search, 'Search'),
   _NavSpec(Icons.home_filled, 'Home'),
   _NavSpec(Icons.movie_outlined, 'Movies'),
   _NavSpec(Icons.live_tv_outlined, 'TV Series'),
+  _NavSpec(Icons.video_library_outlined, 'Library'),
   _NavSpec(Icons.settings_outlined, 'Settings'),
 ];
 
@@ -36,6 +38,9 @@ class AppShell extends StatefulWidget {
 }
 
 class _AppShellState extends State<AppShell> {
+  // Index of the Home branch in _navItems (Search, Home, Movies, TV, Settings).
+  static const int _homeIndex = 1;
+
   late final List<FocusNode> _railNodes = List.generate(
     _navItems.length,
     (i) => FocusNode(debugLabel: 'rail-${_navItems[i].label}'),
@@ -123,55 +128,66 @@ class _AppShellState extends State<AppShell> {
       child: widget.navigationShell,
     );
 
-    if (portrait) {
-      return Scaffold(
-        backgroundColor: AppColors.charcoal,
-        body: Column(
-          children: [
-            Expanded(child: content),
-            Focus(
-              onKeyEvent: _onRailKey,
-              canRequestFocus: false,
-              child: Container(
-                height: 60,
-                color: AppColors.railBlack,
-                padding: const EdgeInsets.symmetric(horizontal: 24),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: buttons,
+    final Widget scaffold = portrait
+        ? Scaffold(
+            backgroundColor: AppColors.charcoal,
+            body: Column(
+              children: [
+                Expanded(child: content),
+                Focus(
+                  onKeyEvent: _onRailKey,
+                  canRequestFocus: false,
+                  child: Container(
+                    height: 60,
+                    color: AppColors.railBlack,
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: buttons,
+                    ),
+                  ),
                 ),
-              ),
+              ],
             ),
-          ],
-        ),
-      );
-    }
+          )
+        : Scaffold(
+            backgroundColor: AppColors.charcoal,
+            body: Row(
+              children: [
+                Focus(
+                  onKeyEvent: _onRailKey,
+                  canRequestFocus: false,
+                  child: Container(
+                    width: 60,
+                    color: AppColors.railBlack,
+                    padding: const EdgeInsets.symmetric(vertical: 24),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        for (final b in buttons) ...[
+                          b,
+                          const SizedBox(height: 12),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+                Expanded(child: content),
+              ],
+            ),
+          );
 
-    return Scaffold(
-      backgroundColor: AppColors.charcoal,
-      body: Row(
-        children: [
-          Focus(
-            onKeyEvent: _onRailKey,
-            canRequestFocus: false,
-            child: Container(
-              width: 60,
-              color: AppColors.railBlack,
-              padding: const EdgeInsets.symmetric(vertical: 24),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  for (final b in buttons) ...[
-                    b,
-                    const SizedBox(height: 12),
-                  ],
-                ],
-              ),
-            ),
-          ),
-          Expanded(child: content),
-        ],
-      ),
+    // TV / Android back: from any non-Home tab, go to Home instead of closing
+    // the app. Only a back press while already on Home exits the app.
+    return PopScope(
+      canPop: current == _homeIndex,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        if (current != _homeIndex) {
+          widget.navigationShell.goBranch(_homeIndex, initialLocation: true);
+        }
+      },
+      child: scaffold,
     );
   }
 }

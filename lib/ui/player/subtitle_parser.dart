@@ -1,7 +1,11 @@
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:dio/dio.dart';
+
+// Byte read + gunzip live in a conditional-import sibling so `dart:io` never
+// reaches the web build.
+import 'subtitle_bytes_io.dart'
+    if (dart.library.html) 'subtitle_bytes_web.dart';
 
 /// One subtitle cue: when to show [text] and until when.
 class SubtitleCue {
@@ -36,23 +40,12 @@ Future<List<SubtitleCue>> loadSubtitleCues(String uri, {String? userAgent}) asyn
       );
       bytes = resp.data ?? const [];
     } else {
-      final path =
-          uri.startsWith('file://') ? Uri.parse(uri).toFilePath() : uri;
-      bytes = await File(path).readAsBytes();
+      bytes = await readLocalBytes(uri);
     }
-    return parseSubtitles(_decode(_maybeGunzip(bytes)));
+    return parseSubtitles(_decode(maybeGunzip(bytes)));
   } catch (_) {
     return const [];
   }
-}
-
-List<int> _maybeGunzip(List<int> bytes) {
-  if (bytes.length >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b) {
-    try {
-      return gzip.decode(bytes);
-    } catch (_) {}
-  }
-  return bytes;
 }
 
 String _decode(List<int> bytes) {

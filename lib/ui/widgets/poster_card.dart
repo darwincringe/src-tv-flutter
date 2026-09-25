@@ -5,6 +5,7 @@ import '../../core/focus.dart';
 import '../../core/theme.dart';
 import '../../data/models/media_item.dart';
 import '../../data/tmdb/image_urls.dart';
+import 'coming_soon_badge.dart';
 
 /// A 2:3 poster tile used across the category rows. Focus scales it up and
 /// draws a white border (matching the Kotlin `PosterCard`).
@@ -36,13 +37,19 @@ class PosterCard extends StatelessWidget {
         focusNode: focusNode,
         onFocusChange: onFocusChange,
         focusedScale: 1.08,
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(10),
         child: AspectRatio(
           aspectRatio: 2 / 3,
-          child: PosterImage(
-            path: item.posterPath,
-            title: item.displayTitle,
-            displayWidth: width,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              PosterImage(
+                path: item.posterPath,
+                title: item.displayTitle,
+                displayWidth: width,
+              ),
+              if (item.comingSoon) const PosterComingSoonBadge(),
+            ],
           ),
         ),
       ),
@@ -76,7 +83,11 @@ class PosterImage extends StatelessWidget {
       imageUrl: url,
       fit: BoxFit.cover,
       memCacheWidth: cacheWidth,
-      placeholder: (_, _) => Container(color: AppColors.charcoalLight),
+      // Smooth cross-fade up from black (instead of a hard "box" pop-in).
+      fadeInDuration: const Duration(milliseconds: 400),
+      fadeInCurve: Curves.easeOut,
+      fadeOutDuration: const Duration(milliseconds: 250),
+      placeholder: (_, _) => const ColoredBox(color: Colors.black),
       errorWidget: (_, _, _) => _placeholder(),
     );
   }

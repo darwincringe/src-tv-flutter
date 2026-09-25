@@ -1,9 +1,14 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import '../../core/theme.dart';
 import '../../data/models/media_details.dart';
 import '../../data/models/media_item.dart';
 import 'poster_card.dart';
+
+/// On the web build, mouse drag-scrolling of long rows is unreliable, so cap
+/// every row at this many cards (all reachable by wheel scroll).
+const int _webRowCap = 20;
 
 /// A titled horizontal row of poster cards. Mirrors the Kotlin
 /// `CategoryRowSection`.
@@ -56,7 +61,7 @@ class _CategoryRowSectionState extends State<CategoryRowSection> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.only(left: 40, bottom: 10),
+          padding: const EdgeInsets.only(left: 40, bottom: 6),
           child: Text(
             widget.row.title,
             style: const TextStyle(
@@ -73,7 +78,9 @@ class _CategoryRowSectionState extends State<CategoryRowSection> {
             // Don't clip the focus scale-up of the poster cards.
             clipBehavior: Clip.none,
             padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 6),
-            itemCount: widget.row.items.length,
+            itemCount: kIsWeb && widget.row.items.length > _webRowCap
+                ? _webRowCap
+                : widget.row.items.length,
             separatorBuilder: (_, _) => const SizedBox(width: 14),
             itemBuilder: (context, index) {
               final item = widget.row.items[index];

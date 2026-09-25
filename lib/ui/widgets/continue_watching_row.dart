@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import '../../core/focus.dart';
@@ -5,9 +6,9 @@ import '../../core/theme.dart';
 import '../../data/store/watch_progress.dart';
 import 'poster_card.dart';
 
-/// Continue Watching row: poster cards with a watched-progress bar, paginated
-/// in pages of [_pageSize] via a trailing "More" card. Mirrors the Kotlin
-/// `ContinueWatchingRow`.
+/// Continue Watching row: poster cards with a watched-progress bar. Reveals
+/// [_pageSize] at a time and **seamlessly** loads the next batch as the user
+/// nears the end (on focus or scroll) — no "More" button.
 class ContinueWatchingRow extends StatefulWidget {
   const ContinueWatchingRow({
     super.key,
@@ -32,7 +33,39 @@ class ContinueWatchingRow extends StatefulWidget {
 
 class _ContinueWatchingRowState extends State<ContinueWatchingRow> {
   static const int _pageSize = 10;
-  int _visible = _pageSize;
+  static const int _webCap = 20;
+  // Web mouse drag-scroll is unreliable, so show up to [_webCap] upfront (all
+  // reachable by wheel) instead of the drag-triggered lazy load.
+  int _visible = kIsWeb ? _webCap : _pageSize;
+  final ScrollController _scroll = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_onScroll);
+  }
+
+  @override
+  void dispose() {
+    _scroll.removeListener(_onScroll);
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  // Touch/drag path: reveal the next page as the row nears its end.
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    if (_scroll.position.pixels >= _scroll.position.maxScrollExtent - 200) {
+      _loadMore();
+    }
+  }
+
+  void _loadMore() {
+    if (kIsWeb) return; // web shows up to _webCap upfront; no drag-lazy-load
+    if (_visible < widget.items.length) {
+      setState(() => _visible += _pageSize);
+    }
+  }
 
   // Scroll the whole section (title + row) into view when a card is focused, so
   // the title isn't clipped and the row snaps near the top for D-pad nav.
@@ -55,13 +88,12 @@ class _ContinueWatchingRowState extends State<ContinueWatchingRow> {
   Widget build(BuildContext context) {
     final total = widget.items.length;
     final shown = _visible.clamp(0, total);
-    final hasMore = shown < total;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.only(left: 40, bottom: 10),
+          padding: const EdgeInsets.only(left: 40, bottom: 6),
           child: Text(
             widget.title,
             style: const TextStyle(
@@ -72,20 +104,16 @@ class _ContinueWatchingRowState extends State<ContinueWatchingRow> {
           ),
         ),
         SizedBox(
-          height: 248,
+          height: 210,
           child: ListView.separated(
+            controller: _scroll,
             scrollDirection: Axis.horizontal,
             // Don't clip the focus scale-up of the cards.
             clipBehavior: Clip.none,
             padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 6),
-            itemCount: shown + (hasMore ? 1 : 0),
+            itemCount: shown,
             separatorBuilder: (_, _) => const SizedBox(width: 14),
             itemBuilder: (context, index) {
-              if (index >= shown) {
-                return _MoreCard(
-                  onTap: () => setState(() => _visible += _pageSize),
-                );
-              }
               final p = widget.items[index];
               return _ContinueWatchingCard(
                 progress: p,
@@ -95,6 +123,9 @@ class _ContinueWatchingRowState extends State<ContinueWatchingRow> {
                   if (f) {
                     widget.onFocus?.call(p);
                     _ensureSectionVisible();
+                    // Seamlessly reveal the next page before the user reaches
+                    // the very end (D-pad path).
+                    if (index >= shown - 2) _loadMore();
                   }
                 },
                 onTap: () => widget.onTap(p),
@@ -124,100 +155,48 @@ class _ContinueWatchingCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isTv = progress.type == 'tv';
-    return SizedBox(
-      width: 130,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          FocusableCard(
-            onTap: onTap,
-            autofocus: autofocus,
-            focusNode: focusNode,
-            onFocusChange: onFocusChange,
-            focusedScale: 1.08,
-            borderWidth: 3,
-            borderRadius: BorderRadius.circular(6),
-            child: AspectRatio(
-              aspectRatio: 2 / 3,
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  PosterImage(
-                    path: progress.posterPath,
-                    title: progress.title ?? '',
-                    displayWidth: 130,
-                  ),
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: 0,
-                    child: Container(
-                      height: 4,
-                      color: const Color(0x66000000),
-                      alignment: Alignment.centerLeft,
-                      child: FractionallySizedBox(
-                        widthFactor: progress.watchedFraction,
-                        child: Container(color: AppColors.textPrimary),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            progress.title ?? '',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              color: AppColors.textPrimary,
-              fontSize: 13,
-            ),
-          ),
-          if (isTv)
-            Text(
-              'S${progress.season ?? 1} · E${progress.episode ?? 1}',
-              style: const TextStyle(
-                color: AppColors.textSecondary,
-                fontSize: 12,
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _MoreCard extends StatelessWidget {
-  const _MoreCard({required this.onTap});
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
+    // No title / "S1·E2" label here anymore — the focused item's title and
+    // season/episode are shown in the hero at the top. Just the poster + the
+    // watched-progress bar.
     return SizedBox(
       width: 130,
       child: FocusableCard(
         onTap: onTap,
+        autofocus: autofocus,
+        focusNode: focusNode,
+        onFocusChange: onFocusChange,
         focusedScale: 1.08,
-        borderRadius: BorderRadius.circular(6),
+        borderWidth: 3,
+        borderRadius: BorderRadius.circular(10),
         child: AspectRatio(
           aspectRatio: 2 / 3,
-          child: Container(
-            color: AppColors.charcoalLight,
-            alignment: Alignment.center,
-            child: const Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(Icons.chevron_right, color: AppColors.textPrimary, size: 32),
-                SizedBox(height: 4),
-                Text('More', style: TextStyle(color: AppColors.textPrimary)),
-              ],
-            ),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              PosterImage(
+                path: progress.posterPath,
+                title: progress.title ?? '',
+                displayWidth: 130,
+              ),
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: Container(
+                  height: 4,
+                  color: const Color(0x66000000),
+                  alignment: Alignment.centerLeft,
+                  child: FractionallySizedBox(
+                    widthFactor: progress.watchedFraction,
+                    child: Container(color: AppColors.textPrimary),
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),
     );
   }
 }
+

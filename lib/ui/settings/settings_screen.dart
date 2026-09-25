@@ -2,11 +2,12 @@ import 'package:flutter/material.dart';
 
 import '../../core/focus.dart';
 import '../../core/theme.dart';
+import '../../data/auth/auth_service.dart';
+import '../../data/sync/sync_service.dart';
+import '../auth/auth_panel.dart';
 
-enum _AuthMode { login, register }
-
-/// Account page — UI only for now; submit explains accounts aren't wired up
-/// yet. Mirrors the Kotlin `SettingsScreen`.
+/// Account page. Signed out → the register/login form (syncs on success).
+/// Signed in → account summary + Sync now / Sign out. Rebuilds on auth changes.
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
 
@@ -15,12 +16,32 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  _AuthMode _mode = _AuthMode.login;
+  bool _syncing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    AuthService.revision.addListener(_onChange);
+  }
+
+  @override
+  void dispose() {
+    AuthService.revision.removeListener(_onChange);
+    super.dispose();
+  }
+
+  void _onChange() {
+    if (mounted) setState(() {});
+  }
 
   @override
   Widget build(BuildContext context) {
     return Center(
       child: SingleChildScrollView(
+        padding: EdgeInsets.only(
+          top: 32,
+          bottom: 32 + MediaQuery.of(context).viewInsets.bottom,
+        ),
         child: SizedBox(
           width: 440,
           child: Column(
@@ -35,75 +56,95 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ),
               const SizedBox(height: 6),
-              const Text(
-                'Sign in to sync your watchlist across devices',
-                style: TextStyle(color: AppColors.textSecondary),
+              Text(
+                AuthService.isSignedIn
+                    ? 'Your watch history and library sync to this account.'
+                    : 'Sign in to sync your watch history and library across devices.',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: AppColors.textSecondary),
               ),
               const SizedBox(height: 24),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  _ModeTab(
-                    label: 'Login',
-                    selected: _mode == _AuthMode.login,
-                    autofocus: true, // land here first on entering Settings
-                    onTap: () => setState(() => _mode = _AuthMode.login),
-                  ),
-                  const SizedBox(width: 12),
-                  _ModeTab(
-                    label: 'Register',
-                    selected: _mode == _AuthMode.register,
-                    onTap: () => setState(() => _mode = _AuthMode.register),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 24),
-              const _AuthField(placeholder: 'Email'),
-              const SizedBox(height: 14),
-              const _AuthField(placeholder: 'Password', obscure: true),
-              if (_mode == _AuthMode.register) ...[
-                const SizedBox(height: 14),
-                const _AuthField(placeholder: 'Confirm password', obscure: true),
-              ],
-              const SizedBox(height: 24),
-              _PrimaryButton(
-                label: _mode == _AuthMode.login ? 'Sign In' : 'Create Account',
-                onTap: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Accounts are coming soon')),
-                  );
-                },
-              ),
-              const SizedBox(height: 14),
-              const Text(
-                "Accounts aren't functional yet — coming soon.",
-                style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
-              ),
+              if (AuthService.isSignedIn) _signedIn() else _signedOut(),
             ],
           ),
         ),
       ),
     );
   }
+
+  Widget _signedOut() => const AuthPanel(initialMode: AuthMode.login);
+
+  Widget _signedIn() {
+    return Column(
+      children: [
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(
+            color: AppColors.charcoalLight,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                AuthService.username ?? 'Signed in',
+                style: const TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              if (AuthService.email != null) ...[
+                const SizedBox(height: 4),
+                Text(
+                  AuthService.email!,
+                  style: const TextStyle(color: AppColors.textSecondary),
+                ),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: 20),
+        _Button(
+          label: _syncing ? 'Syncing…' : 'Sync now',
+          autofocus: true,
+          onTap: _syncing
+              ? null
+              : () async {
+                  setState(() => _syncing = true);
+                  await SyncService.pullAll();
+                  if (mounted) setState(() => _syncing = false);
+                },
+        ),
+        const SizedBox(height: 12),
+        _Button(
+          label: 'Sign out',
+          filled: false,
+          onTap: () => AuthService.signOut(),
+        ),
+      ],
+    );
+  }
 }
 
-class _ModeTab extends StatefulWidget {
-  const _ModeTab({
+class _Button extends StatefulWidget {
+  const _Button({
     required this.label,
-    required this.selected,
     required this.onTap,
+    this.filled = true,
     this.autofocus = false,
   });
   final String label;
-  final bool selected;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
+  final bool filled;
   final bool autofocus;
 
   @override
-  State<_ModeTab> createState() => _ModeTabState();
+  State<_Button> createState() => _ButtonState();
 }
 
-class _ModeTabState extends State<_ModeTab> {
+class _ButtonState extends State<_Button> {
   bool _focused = false;
 
   @override
@@ -114,94 +155,24 @@ class _ModeTabState extends State<_ModeTab> {
       focusedScale: 1.05,
       showBorder: false,
       onFocusChange: (f) => setState(() => _focused = f),
-      borderRadius: BorderRadius.circular(23),
-      child: FocusRing(
-        focused: _focused,
-        radius: 23,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 10),
-          decoration: BoxDecoration(
-            color:
-                widget.selected ? AppColors.textPrimary : AppColors.charcoalLight,
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Text(
-            widget.label,
-            style: TextStyle(
-              color:
-                  widget.selected ? AppColors.charcoal : AppColors.textSecondary,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _AuthField extends StatelessWidget {
-  const _AuthField({required this.placeholder, this.obscure = false});
-  final String placeholder;
-  final bool obscure;
-
-  @override
-  Widget build(BuildContext context) {
-    return DpadFieldFocus(
-      child: TextField(
-      obscureText: obscure,
-      style: const TextStyle(color: AppColors.textPrimary),
-      decoration: InputDecoration(
-        hintText: placeholder,
-        hintStyle: const TextStyle(color: AppColors.textSecondary),
-        filled: true,
-        fillColor: AppColors.charcoalLight,
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
-          borderSide: BorderSide.none,
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
-          borderSide: const BorderSide(color: AppColors.textPrimary, width: 2),
-        ),
-      ),
-      ),
-    );
-  }
-}
-
-class _PrimaryButton extends StatefulWidget {
-  const _PrimaryButton({required this.label, required this.onTap});
-  final String label;
-  final VoidCallback onTap;
-
-  @override
-  State<_PrimaryButton> createState() => _PrimaryButtonState();
-}
-
-class _PrimaryButtonState extends State<_PrimaryButton> {
-  bool _focused = false;
-
-  @override
-  Widget build(BuildContext context) {
-    return FocusableCard(
-      onTap: widget.onTap,
-      focusedScale: 1.05,
-      showBorder: false,
-      onFocusChange: (f) => setState(() => _focused = f),
       borderRadius: BorderRadius.circular(11),
       child: FocusRing(
         focused: _focused,
         radius: 11,
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 12),
+          width: double.infinity,
+          alignment: Alignment.center,
+          padding: const EdgeInsets.symmetric(vertical: 13),
           decoration: BoxDecoration(
-            color: AppColors.textPrimary,
+            color: widget.filled
+                ? AppColors.textPrimary
+                : AppColors.charcoalLight,
             borderRadius: BorderRadius.circular(8),
           ),
           child: Text(
             widget.label,
-            style: const TextStyle(
-              color: AppColors.charcoal,
+            style: TextStyle(
+              color: widget.filled ? AppColors.charcoal : AppColors.textPrimary,
               fontWeight: FontWeight.w600,
             ),
           ),

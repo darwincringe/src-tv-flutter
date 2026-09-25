@@ -8,14 +8,33 @@ class SubtitlePref {
   final String? language;
   final bool off;
 
-  const SubtitlePref({this.name, this.language, this.off = false});
+  /// When true, the web player shifts this track so caption timing lines up
+  /// with the video's audio. [offsetMs] is the last shift it found.
+  final bool autoSync;
+  final int offsetMs;
 
-  Map<String, dynamic> toJson() => {'name': name, 'lang': language, 'off': off};
+  const SubtitlePref({
+    this.name,
+    this.language,
+    this.off = false,
+    this.autoSync = false,
+    this.offsetMs = 0,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'name': name,
+        'lang': language,
+        'off': off,
+        'autoSync': autoSync,
+        'offsetMs': offsetMs,
+      };
 
   factory SubtitlePref.fromJson(Map<String, dynamic> j) => SubtitlePref(
         name: j['name'] as String?,
         language: j['lang'] as String?,
         off: (j['off'] as bool?) ?? false,
+        autoSync: (j['autoSync'] as bool?) ?? false,
+        offsetMs: (j['offsetMs'] as num?)?.toInt() ?? 0,
       );
 }
 
@@ -33,15 +52,22 @@ class SubtitlePrefStore {
       ? 'subpref_tv-$tmdbId-s${season ?? 0}'
       : 'subpref_movie-$tmdbId';
 
-  static void save(String type, int tmdbId, int? season, SubtitlePref pref) {
-    _prefs.setString(_key(type, tmdbId, season), jsonEncode(pref.toJson()));
+  static Future<void> save(
+    String type,
+    int tmdbId,
+    int? season,
+    SubtitlePref pref,
+  ) {
+    return _prefs.setString(_key(type, tmdbId, season), jsonEncode(pref.toJson()));
   }
 
   static SubtitlePref? get(String type, int tmdbId, int? season) {
     final s = _prefs.getString(_key(type, tmdbId, season));
     if (s == null) return null;
     try {
-      return SubtitlePref.fromJson(jsonDecode(s) as Map<String, dynamic>);
+      final decoded = jsonDecode(s);
+      if (decoded is! Map) return null;
+      return SubtitlePref.fromJson(Map<String, dynamic>.from(decoded));
     } catch (_) {
       return null;
     }

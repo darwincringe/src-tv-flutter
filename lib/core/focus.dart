@@ -142,6 +142,16 @@ class _FocusableCardState extends State<FocusableCard> {
       autofocus: widget.autofocus,
       onFocusChange: _setFocus,
       mouseCursor: SystemMouseCursors.click,
+      // Map Enter/Space (keyboard) + Select (D-pad center) to activation, so a
+      // focused card is selectable by keyboard on web/desktop as well as by a
+      // TV remote — not only by mouse/touch tap.
+      shortcuts: const {
+        SingleActivator(LogicalKeyboardKey.enter): ActivateIntent(),
+        SingleActivator(LogicalKeyboardKey.numpadEnter): ActivateIntent(),
+        SingleActivator(LogicalKeyboardKey.space): ActivateIntent(),
+        SingleActivator(LogicalKeyboardKey.select): ActivateIntent(),
+        SingleActivator(LogicalKeyboardKey.gameButtonA): ActivateIntent(),
+      },
       actions: {
         ActivateIntent: CallbackAction<ActivateIntent>(
           onInvoke: (_) {

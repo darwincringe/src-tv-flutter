@@ -45,6 +45,8 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
   // Rich details for the focused hero (year/rating/runtime/language/genres),
   // fetched lazily so the top hero shows the same info as the details page.
   MediaDetails? _heroDetails;
+  int? _heroSeason; // set when a Continue-Watching (TV) item is focused
+  int? _heroEpisode;
   Timer? _heroDebounce;
   int _heroReqId = 0;
 
@@ -130,6 +132,8 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
     setState(() {
       _hero = item;
       _heroDetails = null;
+      _heroSeason = null; // row items aren't "continuing" a specific episode
+      _heroEpisode = null;
     });
     _heroDebounce?.cancel();
     _heroDebounce = Timer(const Duration(milliseconds: 350), () async {
@@ -159,6 +163,9 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
           voteAverage: d.rating,
         );
         _heroDetails = d;
+        // Show which season/episode the user is on, in the hero meta line.
+        _heroSeason = d.isTv ? (p.season ?? 1) : null;
+        _heroEpisode = d.isTv ? (p.episode ?? 1) : null;
       });
     } catch (_) {}
   }
@@ -198,6 +205,8 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
                     item: _hero,
                     portrait: portrait,
                     details: _heroDetails,
+                    season: _heroSeason,
+                    episode: _heroEpisode,
                   ),
                 ),
                 Expanded(child: _buildRows()),
@@ -260,9 +269,9 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
     }
 
     return ListView.separated(
-      padding: const EdgeInsets.only(top: 8, bottom: 24),
+      padding: const EdgeInsets.only(top: 4, bottom: 20),
       itemCount: sections.length,
-      separatorBuilder: (_, _) => const SizedBox(height: 18),
+      separatorBuilder: (_, _) => const SizedBox(height: 8),
       itemBuilder: (context, index) => sections[index],
     );
   }

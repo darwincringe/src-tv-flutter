@@ -1,4 +1,5 @@
 import '../../data/models/language.dart';
+import '../../data/store/subtitle_pref.dart';
 
 /// A selectable external subtitle track. Mirrors the config built by the Kotlin
 /// `SubtitleConfigs.kt`.
@@ -92,6 +93,37 @@ SubtitleOption apiSubtitleOption(String url) {
 
 List<SubtitleOption> apiSubtitleOptions(List<String> urls) =>
     urls.map(apiSubtitleOption).toList();
+
+/// Where [pref] sits in [opts].
+///
+/// Returns -1 when the user turned subtitles off, the matching index when the
+/// saved name (case-insensitive) or language is in this list, or null when
+/// nothing was saved or this title's tracks don't include that choice. Callers
+/// then fall back to their default (usually English).
+///
+/// Movies and TV seasons reuse one saved choice. Release names change between
+/// episodes, so a name miss still matches the same language.
+int? rememberedSubtitleIndex(List<SubtitleOption> opts, SubtitlePref? pref) {
+  if (pref == null) return null;
+  if (pref.off) return -1;
+  final name = pref.name?.trim().toLowerCase();
+  if (name != null && name.isNotEmpty) {
+    final i = opts.indexWhere((o) => o.label.toLowerCase() == name);
+    if (i >= 0) return i;
+  }
+  final lang = pref.language?.trim().toLowerCase();
+  if (lang != null && lang.isNotEmpty) {
+    final i = opts.indexWhere(
+      (o) => (o.language ?? detectLanguage(o.label) ?? '').toLowerCase() == lang,
+    );
+    if (i >= 0) return i;
+  }
+  return null;
+}
+
+/// Language to store with a pick: the track's code, or one detected from its label.
+String? subtitlePrefLanguage(SubtitleOption opt) =>
+    opt.language ?? detectLanguage(opt.label);
 
 /// Label for an uploaded subtitle file.
 SubtitleOption uploadedSubtitleOption(String uri, int index) => SubtitleOption(

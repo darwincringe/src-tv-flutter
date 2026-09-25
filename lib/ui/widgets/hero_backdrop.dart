@@ -6,6 +6,7 @@ import '../../data/models/language.dart';
 import '../../data/models/media_details.dart';
 import '../../data/models/media_item.dart';
 import '../../data/tmdb/image_urls.dart';
+import 'coming_soon_badge.dart';
 
 /// The hero backdrop image with charcoal fades, pinned top-right and fading
 /// into the page. Follows D-pad focus (the parent updates [item]). Mirrors the
@@ -86,10 +87,17 @@ class HeroInfo extends StatelessWidget {
     required this.item,
     required this.portrait,
     this.details,
+    this.season,
+    this.episode,
   });
   final MediaItem? item;
   final bool portrait;
   final MediaDetails? details;
+
+  /// When the focused item is a series the user is continuing, the season /
+  /// episode to show in the meta line (beside the language).
+  final int? season;
+  final int? episode;
 
   static String _fmtRuntime(int m) {
     final h = m ~/ 60;
@@ -112,6 +120,7 @@ class HeroInfo extends StatelessWidget {
       if (rating > 0) '★ ${rating.toStringAsFixed(1)}',
       if (runtime != null && runtime > 0) _fmtRuntime(runtime),
       if (language.isNotEmpty && language.toLowerCase() != 'unknown') language,
+      if (season != null && episode != null) 'S$season E$episode',
     ];
     final genres = d?.genres ?? const <String>[];
 
@@ -120,7 +129,10 @@ class HeroInfo extends StatelessWidget {
       child: Align(
         alignment: Alignment.topLeft,
         child: FractionallySizedBox(
-          widthFactor: portrait ? 1 : 0.48,
+          // Wider so the overview wraps in fewer lines and stays clear of the
+          // category-row titles below (it may run over the backdrop on the
+          // right — that's fine).
+          widthFactor: portrait ? 1 : 0.72,
           alignment: Alignment.topLeft,
           child: Column(
             mainAxisAlignment: MainAxisAlignment.start,
@@ -136,6 +148,10 @@ class HeroInfo extends StatelessWidget {
                   fontWeight: FontWeight.bold,
                 ),
               ),
+              if (d?.comingSoon ?? it.comingSoon) ...[
+                const SizedBox(height: 8),
+                const ComingSoonBadge(big: true),
+              ],
               if (meta.isNotEmpty) ...[
                 const SizedBox(height: 8),
                 Text(
@@ -155,7 +171,9 @@ class HeroInfo extends StatelessWidget {
               const SizedBox(height: 8),
               Text(
                 it.overview ?? '',
-                maxLines: 5,
+                // Capped so the description never collides with the row titles
+                // below the hero.
+                maxLines: 3,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
                   color: AppColors.textSecondary,

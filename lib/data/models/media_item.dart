@@ -1,5 +1,7 @@
 import 'package:json_annotation/json_annotation.dart';
 
+import '../../core/dates.dart';
+
 part 'media_item.g.dart';
 
 /// A movie or TV entry as returned by TMDB list/search endpoints.
@@ -70,4 +72,10 @@ class MediaItem {
     if (mediaType == 'movie' || mediaType == 'tv') return mediaType!;
     return fallback;
   }
+
+  /// Whether to badge this as "Coming Soon". Movies: upcoming or released
+  /// within the last 30 days. TV: first air date still in the future.
+  bool get comingSoon => resolvedType('movie') == 'tv'
+      ? isComingSoon(firstAirDate)
+      : isComingSoonRelease(releaseDate);
 }

@@ -1,6 +1,7 @@
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../core/dates.dart';
 import '../../core/focus.dart';
@@ -11,8 +12,11 @@ import '../../data/models/details_dto.dart';
 import '../../data/models/media_details.dart';
 import '../../data/models/media_item.dart';
 import '../../data/repository/media_repository.dart';
+import '../../data/store/library_store.dart';
 import '../../data/store/watch_progress.dart';
 import '../../data/tmdb/image_urls.dart';
+import '../player/player_args.dart';
+import '../widgets/coming_soon_badge.dart';
 import '../widgets/state_views.dart';
 
 class DetailsScreen extends ConsumerStatefulWidget {
@@ -47,25 +51,51 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Refresh the resume point whenever playback progress changes — this fires
+    // when returning from the player (in-app nav, not an app resume), so the
+    // button flips to "Resume" with the new timestamp instead of staying "Play".
+    WatchProgressStore.revision.addListener(_refreshProgress);
+    // Keep the "Add to Library" toggle in sync if it changes elsewhere.
+    LibraryStore.revision.addListener(_onLibraryChange);
     _load();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    WatchProgressStore.revision.removeListener(_refreshProgress);
+    LibraryStore.revision.removeListener(_onLibraryChange);
     _scroll.dispose();
     _playFocus.dispose();
     _firstEpisodeFocus.dispose();
     super.dispose();
   }
 
+  void _refreshProgress() {
+    if (!mounted) return;
+    setState(() {
+      _progress = WatchProgressStore.get(_progressType, widget.id);
+    });
+  }
+
+  void _onLibraryChange() {
+    if (mounted) setState(() {});
+  }
+
+  void _toggleLibrary() {
+    final d = _details;
+    if (d == null) return;
+    LibraryStore.toggle(LibraryItem(
+      tmdbId: widget.id,
+      type: _progressType,
+      title: d.title,
+      posterPath: d.posterPath,
+    ));
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      setState(() {
-        _progress = WatchProgressStore.get(_progressType, widget.id);
-      });
-    }
+    if (state == AppLifecycleState.resumed) _refreshProgress();
   }
 
   Future<void> _load() async {
@@ -135,7 +165,12 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
   void _onPlay() {
     final d = _details!;
     if (!d.isTv) {
-      playStream(context, tmdbId: d.id, type: 'movie');
+      playStream(
+        context,
+        tmdbId: d.id,
+        type: 'movie',
+        backdropPath: d.backdropPath,
+      );
       return;
     }
     final saved = _progress;
@@ -146,6 +181,7 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
         type: 'tv',
         season: saved!.season,
         episode: saved.episode,
+        backdropPath: d.backdropPath,
       );
       return;
     }
@@ -159,6 +195,24 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
 
   @override
   Widget build(BuildContext context) {
+    // Intercept back so a stray second back event right after a trailer exits
+    // (WSA can double-deliver one press) doesn't pop this screen too.
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop || !mounted) return;
+        final now = DateTime.now().millisecondsSinceEpoch;
+        if (now < PlayerRuntime.backGuardUntil) {
+          PlayerRuntime.backGuardUntil = 0; // consume the guard once
+          return; // swallow the stray back from the trailer exit
+        }
+        if (context.canPop()) context.pop();
+      },
+      child: _buildBody(context),
+    );
+  }
+
+  Widget _buildBody(BuildContext context) {
     if (_error != null) {
       return Scaffold(
         backgroundColor: AppColors.charcoal,
@@ -196,7 +250,7 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
             top: 8,
             left: 8,
             child: SafeArea(
-              child: _FocusBackButton(onTap: () => Navigator.of(context).maybePop()),
+              child: _FocusBackButton(onTap: () => navBack(context)),
             ),
           ),
         ],
@@ -235,7 +289,7 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
             ],
             if (d.comingSoon) ...[
               const SizedBox(height: 12),
-              const Row(children: [_ComingSoonBadge(big: true)]),
+              const Row(children: [ComingSoonBadge(big: true)]),
             ],
             const SizedBox(height: 16),
             Row(
@@ -263,6 +317,16 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
                     }
                   },
                 ),
+                const SizedBox(width: 12),
+                Builder(builder: (context) {
+                  final inLib = LibraryStore.contains(_progressType, widget.id);
+                  return _PlayButton(
+                    label: inLib ? 'In Library' : 'Add to Library',
+                    icon: inLib ? Icons.check : Icons.add,
+                    filled: false,
+                    onTap: _toggleLibrary,
+                  );
+                }),
               ],
             ),
             const SizedBox(height: 16),
@@ -301,6 +365,10 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
       parts.add('${d.numberOfSeasons} Season${d.numberOfSeasons == 1 ? '' : 's'}');
     }
     if (d.language != null) parts.add(d.language!);
+    // Where the user left off (resume point), beside the language.
+    if (d.isTv && _resumable && _progress?.episode != null) {
+      parts.add('S${_progress!.season ?? 1} E${_progress!.episode}');
+    }
     return Text(
       parts.join('   •   '),
       style: const TextStyle(color: AppColors.textSecondary),
@@ -419,6 +487,7 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
                       type: 'tv',
                       season: _selectedSeason,
                       episode: _episodes[i].episodeNumber,
+                      backdropPath: d.backdropPath,
                     ),
                   ),
               ];
@@ -844,7 +913,7 @@ class _EpisodeRow extends StatelessWidget {
                         ),
                         if (comingSoon) ...[
                           const SizedBox(width: 8),
-                          const _ComingSoonBadge(),
+                          const ComingSoonBadge(),
                         ],
                       ],
                     ),
@@ -946,36 +1015,6 @@ class _SimilarCard extends StatelessWidget {
               ),
             ),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-/// A small amber "COMING SOON" pill for titles/episodes with a future release
-/// or air date. It's informational only — the Play button stays enabled.
-class _ComingSoonBadge extends StatelessWidget {
-  const _ComingSoonBadge({this.big = false});
-  final bool big;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: EdgeInsets.symmetric(
-        horizontal: big ? 10 : 7,
-        vertical: big ? 5 : 3,
-      ),
-      decoration: BoxDecoration(
-        color: AppColors.ratingYellow,
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: Text(
-        'COMING SOON',
-        style: TextStyle(
-          color: AppColors.charcoal,
-          fontSize: big ? 12 : 9,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0.5,
         ),
       ),
     );

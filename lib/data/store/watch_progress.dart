@@ -101,6 +101,12 @@ class WatchProgressStore {
   /// backgrounding the app, doesn't fire an app-resume lifecycle event.
   static final ValueNotifier<int> revision = ValueNotifier<int>(0);
 
+  /// Optional sync hooks, set by SyncService once accounts land. Fired AFTER a
+  /// local write so a signed-in user's change can be pushed to their account.
+  /// Null (no-op) when signed out or before SyncService.init().
+  static void Function(WatchProgress p)? onSaved;
+  static void Function(String type, int tmdbId)? onRemoved;
+
   static Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
   }
@@ -110,6 +116,7 @@ class WatchProgressStore {
   static void save(WatchProgress p) {
     _prefs.setString(_key(p.type, p.tmdbId), jsonEncode(p.toJson()));
     revision.value++;
+    onSaved?.call(p);
   }
 
   static WatchProgress? get(String type, int tmdbId) {
@@ -125,6 +132,7 @@ class WatchProgressStore {
   static void remove(String type, int tmdbId) {
     _prefs.remove(_key(type, tmdbId));
     revision.value++;
+    onRemoved?.call(type, tmdbId);
   }
 
   /// All records, active (not completed) first by most-recent, then completed
