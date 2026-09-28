@@ -34,10 +34,12 @@ class WatchProgress {
   bool get isResumable =>
       positionMs > 5000 && positionMs < durationMs - 10000;
 
-  /// Shown in Continue Watching: not finished, and either resumable or a TV
-  /// record queued at the start of the next episode (position 0).
+  /// Shown in Continue Watching and as Resume. A series stays here until the
+  /// last episode actually finishes — closing during the credits of one
+  /// episode (inside the last 10s, so [isResumable] is false) still counts.
   bool get isContinuable =>
-      !completed && (isResumable || (type == 'tv' && positionMs == 0));
+      !completed &&
+      (isResumable || (type == 'tv' && (positionMs == 0 || positionMs > 5000)));
 
   double get watchedFraction =>
       durationMs > 0 ? (positionMs / durationMs).clamp(0.0, 1.0) : 0.0;

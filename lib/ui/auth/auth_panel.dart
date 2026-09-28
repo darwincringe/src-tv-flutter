@@ -3,16 +3,14 @@ import 'package:flutter/material.dart';
 import '../../core/focus.dart';
 import '../../core/theme.dart';
 import '../../data/auth/auth_service.dart';
-import '../../data/store/library_store.dart';
-import '../../data/store/watch_progress.dart';
 import '../../data/sync/sync_service.dart';
 
 enum AuthMode { login, register }
 
 /// The register/login form, wired to [AuthService]. Reused by the first-run
 /// welcome gate and the Settings page. Built for a TV remote: Enter/OK on a
-/// field moves to the NEXT field (not the button), fields scroll clear of the
-/// on-screen keyboard, and the post-auth sync dialog is D-pad focusable.
+/// field moves to the NEXT field (not the button), and fields scroll clear of
+/// the on-screen keyboard. Signing in syncs this device with the account.
 class AuthPanel extends StatefulWidget {
   const AuthPanel({
     super.key,
@@ -109,7 +107,7 @@ class _AuthPanelState extends State<AuthPanel> {
       });
       return;
     }
-    await runPostAuthSync(context);
+    await SyncService.sync();
     if (!mounted) return;
     setState(() => _busy = false);
     widget.onAuthenticated?.call();
@@ -212,130 +210,6 @@ class _AuthPanelState extends State<AuthPanel> {
           ),
         ],
       ],
-    );
-  }
-}
-
-/// Post-authentication: if this device has local data, ask whether to upload it
-/// to the account; then pull the account's data down (last-write-wins).
-Future<void> runPostAuthSync(BuildContext context) async {
-  final localCount =
-      WatchProgressStore.all().length + LibraryStore.all().length;
-  var upload = false;
-  if (localCount > 0) {
-    upload = await showDialog<bool>(
-          context: context,
-          barrierColor: Colors.black87,
-          builder: (_) => _SyncPromptDialog(count: localCount),
-        ) ??
-        false;
-  }
-  if (upload) {
-    final ok = await SyncService.pushAllLocal();
-    if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            ok
-                ? 'This device\'s data was saved to your account.'
-                : 'Could not upload local data — it will retry as you use the app.',
-          ),
-        ),
-      );
-    }
-  }
-  await SyncService.pullAll();
-}
-
-/// The "save this device's data" dialog. A [FocusScope] + an explicit
-/// post-frame focus request guarantee the remote lands on a button (autofocus
-/// alone can miss while the dialog route is still animating in).
-class _SyncPromptDialog extends StatefulWidget {
-  const _SyncPromptDialog({required this.count});
-  final int count;
-
-  @override
-  State<_SyncPromptDialog> createState() => _SyncPromptDialogState();
-}
-
-class _SyncPromptDialogState extends State<_SyncPromptDialog> {
-  final _syncNode = FocusNode(debugLabel: 'syncBtn');
-
-  @override
-  void initState() {
-    super.initState();
-    // Force focus onto a dialog button so the remote lands inside the modal and
-    // can't drift to the widgets behind it. Post-frame handles the normal case;
-    // the short delay covers the route still transitioning in.
-    WidgetsBinding.instance.addPostFrameCallback((_) => _focusSync());
-    Future.delayed(const Duration(milliseconds: 150), _focusSync);
-  }
-
-  void _focusSync() {
-    if (mounted) _syncNode.requestFocus();
-  }
-
-  @override
-  void dispose() {
-    _syncNode.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final n = widget.count;
-    return Dialog(
-      backgroundColor: AppColors.charcoalLight,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-      // A traversal group keeps D-pad Left/Right/Up/Down contained to the two
-      // buttons instead of escaping to the form behind the modal.
-      child: FocusTraversalGroup(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text(
-                'Save this device\'s data to your account?',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: AppColors.textPrimary,
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 10),
-              Text(
-                'You have $n item${n == 1 ? '' : 's'} watched or saved on this '
-                'device. Sync them so they follow you to other devices.',
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: AppColors.textSecondary,
-                  fontSize: 13,
-                ),
-              ),
-              const SizedBox(height: 22),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  _PillButton(
-                    label: 'Not now',
-                    filled: false,
-                    onTap: () => Navigator.pop(context, false),
-                  ),
-                  const SizedBox(width: 12),
-                  _PillButton(
-                    label: 'Sync',
-                    focusNode: _syncNode,
-                    autofocus: true,
-                    onTap: () => Navigator.pop(context, true),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
     );
   }
 }
@@ -486,14 +360,10 @@ class _PillButton extends StatefulWidget {
     required this.label,
     required this.onTap,
     this.filled = true,
-    this.autofocus = false,
-    this.focusNode,
   });
   final String label;
   final VoidCallback? onTap;
   final bool filled;
-  final bool autofocus;
-  final FocusNode? focusNode;
 
   @override
   State<_PillButton> createState() => _PillButtonState();
@@ -506,8 +376,6 @@ class _PillButtonState extends State<_PillButton> {
   Widget build(BuildContext context) {
     return FocusableCard(
       onTap: widget.onTap,
-      focusNode: widget.focusNode,
-      autofocus: widget.autofocus,
       focusedScale: 1.05,
       showBorder: false,
       onFocusChange: (f) => setState(() => _focused = f),

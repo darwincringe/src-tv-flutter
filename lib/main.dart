@@ -33,7 +33,7 @@ Future<void> main() async {
   // If already signed in, pull the account's data in the background — the store
   // revision notifiers refresh the UI when it lands. Don't block startup on it.
   if (AuthService.isSignedIn) {
-    SyncService.pullAll();
+    SyncService.sync();
   }
   runApp(const ProviderScope(child: SrcTvApp()));
 }

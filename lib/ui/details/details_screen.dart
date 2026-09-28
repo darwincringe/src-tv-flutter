@@ -1,7 +1,6 @@
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
 
 import '../../core/dates.dart';
 import '../../core/focus.dart';
@@ -206,7 +205,7 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
           PlayerRuntime.backGuardUntil = 0; // consume the guard once
           return; // swallow the stray back from the trailer exit
         }
-        if (context.canPop()) context.pop();
+        navBack(context);
       },
       child: _buildBody(context),
     );

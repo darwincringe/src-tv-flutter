@@ -91,8 +91,26 @@ SubtitleOption apiSubtitleOption(String url) {
   return SubtitleOption(uri: requestUrl, label: label, language: language);
 }
 
-List<SubtitleOption> apiSubtitleOptions(List<String> urls) =>
-    urls.map(apiSubtitleOption).toList();
+/// Builds subtitle options and numbers identical names: the first keeps its
+/// name ("English"), later copies become "English 2", "English 3", and so on.
+List<SubtitleOption> apiSubtitleOptions(List<String> urls) {
+  final raw = urls.map(apiSubtitleOption).toList();
+  final counts = <String, int>{};
+  final canonical = <String, String>{};
+  final out = <SubtitleOption>[];
+  for (final opt in raw) {
+    final key = opt.label.trim().toLowerCase();
+    final base = canonical.putIfAbsent(key, () => opt.label.trim());
+    final n = (counts[key] ?? 0) + 1;
+    counts[key] = n;
+    out.add(SubtitleOption(
+      uri: opt.uri,
+      label: n == 1 ? base : '$base $n',
+      language: opt.language,
+    ));
+  }
+  return out;
+}
 
 /// Where [pref] sits in [opts].
 ///

@@ -3,11 +3,11 @@ import 'package:flutter/material.dart';
 import '../../core/focus.dart';
 import '../../core/theme.dart';
 import '../../data/auth/auth_service.dart';
-import '../../data/sync/sync_service.dart';
 import '../auth/auth_panel.dart';
 
 /// Account page. Signed out → the register/login form (syncs on success).
-/// Signed in → account summary + Sync now / Sign out. Rebuilds on auth changes.
+/// Signed in → account summary and sign out. Watch history, recommendations,
+/// and the library sync on their own. Rebuilds on auth changes.
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
 
@@ -16,8 +16,6 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  bool _syncing = false;
-
   @override
   void initState() {
     super.initState();
@@ -58,8 +56,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               const SizedBox(height: 6),
               Text(
                 AuthService.isSignedIn
-                    ? 'Your watch history and library sync to this account.'
-                    : 'Sign in to sync your watch history and library across devices.',
+                    ? 'Continue Watching, recommendations, and your library follow this account.'
+                    : 'Sign in to keep Continue Watching, recommendations, and your library in sync.',
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: AppColors.textSecondary),
               ),
@@ -107,18 +105,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
         const SizedBox(height: 20),
         _Button(
-          label: _syncing ? 'Syncing…' : 'Sync now',
-          autofocus: true,
-          onTap: _syncing
-              ? null
-              : () async {
-                  setState(() => _syncing = true);
-                  await SyncService.pullAll();
-                  if (mounted) setState(() => _syncing = false);
-                },
-        ),
-        const SizedBox(height: 12),
-        _Button(
           label: 'Sign out',
           filled: false,
           onTap: () => AuthService.signOut(),
@@ -133,12 +119,10 @@ class _Button extends StatefulWidget {
     required this.label,
     required this.onTap,
     this.filled = true,
-    this.autofocus = false,
   });
   final String label;
   final VoidCallback? onTap;
   final bool filled;
-  final bool autofocus;
 
   @override
   State<_Button> createState() => _ButtonState();
@@ -151,7 +135,6 @@ class _ButtonState extends State<_Button> {
   Widget build(BuildContext context) {
     return FocusableCard(
       onTap: widget.onTap,
-      autofocus: widget.autofocus,
       focusedScale: 1.05,
       showBorder: false,
       onFocusChange: (f) => setState(() => _focused = f),

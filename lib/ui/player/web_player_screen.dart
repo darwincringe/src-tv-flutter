@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:js_interop';
 import 'dart:js_interop_unsafe';
-import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:ui_web' as ui_web;
 
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -18,9 +20,11 @@ import '../../data/models/details_dto.dart';
 import '../../data/repository/media_repository.dart';
 import '../../data/store/subtitle_pref.dart';
 import '../../data/store/watch_progress.dart';
+import '../../data/sync/sync_service.dart';
 import 'player_args.dart';
 import 'subtitle_config.dart';
 import 'subtitle_parser.dart';
+import 'subtitle_sync.dart';
 
 // ---- hls.js interop (bundled in web/hls.min.js, loaded from index.html) -----
 @JS('Hls')
@@ -50,9 +54,31 @@ extension type _AudioCtx._(JSObject _) implements JSObject {
   external factory _AudioCtx();
   external _AudioNode createMediaElementSource(JSObject element);
   external _AnalyserNode createAnalyser();
+  external _GainNode createGain();
+  external _ScriptProcessor createScriptProcessor(
+      int bufferSize, int inputs, int outputs);
   external JSObject get destination;
+  external double get sampleRate;
   external JSPromise resume();
 }
+
+extension type _GainNode._(JSObject _) implements JSObject {
+  external void connect(JSObject destination);
+  external _AudioParam get gain;
+}
+
+extension type _AudioParam._(JSObject _) implements JSObject {
+  external set value(double v);
+}
+
+extension type _ScriptProcessor._(JSObject _) implements JSObject {
+  external void connect(JSObject destination);
+  external set onaudioprocess(JSFunction fn);
+}
+
+@JS('srctvTranscribe')
+external JSPromise<JSString> _srctvTranscribe(
+    JSFloat32Array samples, double sampleRate);
 
 extension type _AudioNode._(JSObject _) implements JSObject {
   external void connect(JSObject destination);
@@ -61,8 +87,9 @@ extension type _AudioNode._(JSObject _) implements JSObject {
 extension type _AnalyserNode._(JSObject _) implements JSObject {
   external void connect(JSObject destination);
   external set fftSize(int value);
+  external set smoothingTimeConstant(double value);
   external int get frequencyBinCount;
-  external void getByteTimeDomainData(JSUint8Array array);
+  external void getByteFrequencyData(JSUint8Array array);
 }
 
 class _EpisodeRef {
@@ -127,6 +154,8 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   String? _actionKind; // 'intro' | 'recap' | 'next' | null
 
   List<SubtitleOption> _subs = const [];
+  final List<SubtitleOption> _uploaded = [];
+  final Map<String, List<SubtitleCue>> _uploadedCues = {};
   int _subIndex = -1; // -1 = off
   List<SubtitleCue> _cues = const [];
   int _subToken = 0;
@@ -134,7 +163,13 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   bool _autoSync = false;
   int _syncOffsetMs = 0;
   int _syncToken = 0;
+  int _syncAttempts = 0;
   final ValueNotifier<String> _syncNote = ValueNotifier('');
+  bool _armCapture = false;
+  final List<Float32List> _pcmChunks = [];
+  int _pcmSamples = 0;
+  int? _lineVideoMs;
+  Completer<void>? _captureDone;
   _AudioCtx? _audioCtx;
   _AnalyserNode? _analyser;
   bool _audioTapFailed = false;
@@ -150,6 +185,8 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   void initState() {
     super.initState();
     PlayerRuntime.isOpen = true;
+    SubtitlePrefStore.revision.addListener(_onRemoteSubtitle);
+    SyncService.pullSubtitlePrefs();
     _season = _a.season;
     _episode = _a.episode;
     _viewType = 'srctv-video-$_now';
@@ -233,7 +270,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
       _computeEpisodeRefs();
       _resumeTargetMs = _savedResumePosition();
       _resumeDone = _resumeTargetMs <= 0;
-      _subs = apiSubtitleOptions(res.subtitles);
+      _subs = [...apiSubtitleOptions(res.subtitles), ..._uploaded];
       // Apply the remembered choice (per-season for TV / per-title for movies),
       // else default to English. Not saved — only user picks persist.
       _selectSubtitle(_initialSubtitleIndex(), save: false);
@@ -477,24 +514,14 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
     return null;
   }
 
-  int _completionThresholdMs() {
-    final dur = _durationMs;
-    final outro = _segments?.outro;
-    if (_isTv && outro != null && (dur <= 0 || outro.startMs > dur * 0.5)) {
-      return outro.startMs;
-    }
-    return (dur * 0.95).round();
-  }
-
   // ---- progress ----------------------------------------------------------
   void _saveProgress() {
     if (_a.mode != PlayerMode.stream || !_resumeDone) return;
     final dur = _durationMs;
     if (dur <= 0) return;
-    if (_actionKind == 'next' || _positionMs >= _completionThresholdMs()) {
-      _markCompleted();
-      return;
-    }
+    // Closing or the periodic save must keep this episode, even in the credits.
+    // Finishing the file (_onEnded) is what advances to the next episode or
+    // marks the series complete when there is no next one.
     WatchProgressStore.save(WatchProgress(
       tmdbId: _a.tmdbId!,
       type: _a.type!,
@@ -566,13 +593,17 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   Future<void> _selectSubtitle(int index, {bool save = true}) async {
-    final stored = SubtitlePrefStore.get(_a.type!, _a.tmdbId!, _season);
-    if (!save && stored != null) {
-      _autoSync = stored.autoSync && !stored.off;
-      _syncOffsetMs = _autoSync ? stored.offsetMs : 0;
-    } else if (save) {
-      _syncOffsetMs = 0;
-    }
+    // Re-tapping the current track (or closing the menu onto it) must not
+    // cancel a listen that is already running.
+    if (index == _subIndex && _autoSync && _cues.isNotEmpty) return;
+    _syncToken++;
+    _syncAttempts = 0;
+    // Opt-in. Don't check the box from a previous visit, and don't keep a
+    // shift from a bad earlier guess. Timing stays on the file's own clock
+    // until the viewer turns auto-sync on.
+    _autoSync = false;
+    _syncOffsetMs = 0;
+    _syncNote.value = '';
     setState(() {
       _subIndex = index;
       _cues = const [];
@@ -582,18 +613,45 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
     if (save) await _persistSubPref(index);
     if (index < 0 || index >= _subs.length) return;
     final token = ++_subToken;
-    final cues = await loadSubtitleCues(_subs[index].uri);
+    final uri = _subs[index].uri;
+    final cues = _uploadedCues[uri] ?? await loadSubtitleCues(uri);
     if (!mounted || token != _subToken) return;
     setState(() => _cues = cues);
     // On iOS render via a native track (visible in native fullscreen); the
     // Flutter overlay is suppressed there to avoid double subtitles.
     if (_iosNative && cues.isNotEmpty) _applyIosTextTrack(cues, index);
-    if (_autoSync) _beginAutoSync();
+  }
+
+  /// Another device saved a choice for this title. Apply it without writing
+  /// back, or the two devices would keep overwriting each other.
+  void _onRemoteSubtitle() {
+    if (!mounted || _subs.isEmpty) return;
+    final pref = SubtitlePrefStore.get(_a.type!, _a.tmdbId!, _season);
+    if (pref == null) return;
+    final idx = rememberedSubtitleIndex(_subs, pref);
+    if (idx == null) return;
+    if (idx != _subIndex) {
+      if (_autoSync) return;
+      _selectSubtitle(idx, save: false);
+      return;
+    }
+    if (!_autoSync || pref.offsetMs == _syncOffsetMs) return;
+    _syncOffsetMs = pref.offsetMs;
+    if (_iosNative && _subIndex >= 0 && _cues.isNotEmpty) {
+      _applyIosTextTrack(_cues, _subIndex);
+    }
+    if (mounted) setState(() {});
   }
 
   Future<void> _persistSubPref(int index) {
+    final prev = SubtitlePrefStore.get(_a.type!, _a.tmdbId!, _season);
     final pref = index < 0
-        ? const SubtitlePref(off: true)
+        ? SubtitlePref(
+            off: true,
+            name: prev?.name,
+            language: prev?.language,
+            offsetMs: prev?.offsetMs ?? _syncOffsetMs,
+          )
         : SubtitlePref(
             name: _subs[index].label,
             language: subtitlePrefLanguage(_subs[index]),
@@ -607,14 +665,16 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
     _autoSync = on;
     if (!on) {
       _syncToken++;
+      _syncAttempts = 0;
       _syncOffsetMs = 0;
       _syncNote.value = '';
     } else {
+      _syncAttempts = 0;
       _syncNote.value = 'Listening to the audio…';
     }
     if (mounted) setState(() {});
     await _persistSubPref(_subIndex);
-    if (on) _beginAutoSync();
+    if (on && _subIndex >= 0 && _cues.isNotEmpty) _beginAutoSync();
   }
 
   bool _tapAudio() {
@@ -623,9 +683,18 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
     try {
       final ctx = _AudioCtx();
       final source = ctx.createMediaElementSource(_video);
-      final analyser = ctx.createAnalyser()..fftSize = 2048;
+      final analyser = ctx.createAnalyser()
+        ..fftSize = 2048
+        ..smoothingTimeConstant = 0.35;
       source.connect(analyser);
       analyser.connect(ctx.destination);
+      final processor = ctx.createScriptProcessor(4096, 1, 1);
+      final mute = ctx.createGain();
+      mute.gain.value = 0;
+      processor.onaudioprocess = _onPcm.toJS;
+      source.connect(processor);
+      processor.connect(mute);
+      mute.connect(ctx.destination);
       _audioCtx = ctx;
       _analyser = analyser;
       return true;
@@ -635,118 +704,163 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
     }
   }
 
-  double _readRms() {
-    final analyser = _analyser;
-    if (analyser == null) return 0;
-    final n = analyser.frequencyBinCount;
-    final data = JSUint8Array.withLength(n);
-    analyser.getByteTimeDomainData(data);
-    final bytes = data.toDart;
-    var sum = 0.0;
-    for (var i = 0; i < n; i++) {
-      final v = bytes[i] - 128;
-      sum += v * v;
+  void _onPcm(JSObject event) {
+    if (!_armCapture || !_autoSync || _video.paused) return;
+    final input = event['inputBuffer'] as JSObject?;
+    if (input == null) return;
+    final data = input.callMethod<JSFloat32Array>('getChannelData'.toJS, 0.toJS);
+    final view = data.toDart;
+    var energy = 0.0;
+    var counted = 0;
+    for (var i = 0; i < view.length; i += 8) {
+      final v = view[i];
+      energy += v * v;
+      counted++;
     }
-    return math.sqrt(sum / n);
+    final loud = counted > 0 && energy / counted > 0.0004;
+    if (_lineVideoMs == null) {
+      if (!loud) return;
+      final t = _video.currentTime;
+      if (!t.isFinite || t < 0) return;
+      // This buffer already played, so the sentence started one buffer ago.
+      final bufferSec = view.length / (_audioCtx?.sampleRate ?? 48000);
+      final start = t - bufferSec;
+      _lineVideoMs = ((start < 0 ? 0 : start) * 1000).round();
+    }
+    _pcmChunks.add(Float32List.fromList(view));
+    _pcmSamples += view.length;
+    final rate = _audioCtx?.sampleRate ?? 48000;
+    if (_pcmSamples / rate >= 6) {
+      _armCapture = false;
+      final done = _captureDone;
+      if (done != null && !done.isCompleted) done.complete();
+    }
   }
 
-  /// Lines the current track up with speech. Captions that are early or late
-  /// by one fixed amount (a different encode, not a different cut) show up as
-  /// a shift between voice activity and cue times. Listens for a short stretch
-  /// of playback, then applies that shift. Optional — only runs when the user
-  /// turns it on.
+  Future<({Float32List samples, double rate, int videoMs})?> _captureLine(
+    int token,
+  ) async {
+    _pcmChunks.clear();
+    _pcmSamples = 0;
+    _lineVideoMs = null;
+    final done = Completer<void>();
+    _captureDone = done;
+    _armCapture = true;
+    final started = DateTime.now();
+    while (!done.isCompleted &&
+        DateTime.now().difference(started) < const Duration(seconds: 22)) {
+      if (!mounted || token != _syncToken || !_autoSync) {
+        _armCapture = false;
+        return null;
+      }
+      await Future.delayed(const Duration(milliseconds: 200));
+    }
+    _armCapture = false;
+    final rate = _audioCtx?.sampleRate ?? 0;
+    final startMs = _lineVideoMs;
+    if (startMs == null || rate <= 0 || _pcmSamples < rate * 2) return null;
+    final merged = Float32List(_pcmSamples);
+    var offset = 0;
+    for (final chunk in _pcmChunks) {
+      merged.setRange(offset, offset + chunk.length, chunk);
+      offset += chunk.length;
+    }
+    _pcmChunks.clear();
+    _pcmSamples = 0;
+    return (samples: merged, rate: rate, videoMs: startMs);
+  }
+
+  /// Text of one spoken sentence, and how far into the recording it began.
+  Future<({String text, int startMs})?> _readLine(
+    Float32List samples,
+    double rate,
+  ) async {
+    try {
+      final raw =
+          (await _srctvTranscribe(samples.toJS, rate).toDart).toDart;
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        final start = (decoded['start'] as num?)?.toDouble() ?? 0;
+        return (
+          text: (decoded['text'] ?? '').toString(),
+          startMs: start > 0 ? (start * 1000).round() : 0,
+        );
+      }
+      return (text: raw, startMs: 0);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Hears one spoken line, finds that line in the subtitle file, and shifts
+  /// the captions so the file's timestamp matches the video.
   Future<void> _beginAutoSync() async {
     final token = ++_syncToken;
-    if (_subIndex < 0 || _cues.isEmpty) {
-      _syncNote.value = 'Choose a subtitle first';
+    if (_subIndex < 0 || _cues.isEmpty || !_autoSync) {
+      if (_subIndex < 0) _syncNote.value = 'Choose a subtitle first';
       return;
     }
     if (!_tapAudio()) {
-      _syncNote.value = 'This stream doesn’t share its audio, so auto-sync can’t run';
+      _finishSyncNote(
+          'This stream doesn’t share its audio, so auto-sync can’t run');
       return;
     }
     try {
       await _audioCtx!.resume().toDart;
     } catch (_) {}
-    if (_syncOffsetMs != 0) {
-      _syncNote.value = 'Checking sync…';
-    } else {
-      _syncNote.value = 'Listening to the audio…';
-    }
-    final energy = <int, double>{};
-    final started = DateTime.now();
-    while (DateTime.now().difference(started) < const Duration(seconds: 35)) {
-      if (!mounted || token != _syncToken || !_autoSync) return;
-      if (!_video.paused) {
-        final t = _video.currentTime;
-        if (t.isFinite && t >= 0) energy[(t * 10).floor()] = _readRms();
-      }
-      if (energy.length >= 200) break;
-      await Future.delayed(const Duration(milliseconds: 100));
-    }
+    _syncNote.value = 'Listening for a line of dialogue…';
+    final clip = await _captureLine(token);
     if (!mounted || token != _syncToken || !_autoSync) return;
-    final offset = _offsetFromSpeech(energy, _cues);
-    if (offset == null) {
-      _syncNote.value = 'Not enough speech yet — leave it on and it will retry';
+    if (clip == null) {
+      if (_syncAttempts >= 2) {
+        _finishSyncNote('Couldn’t hear a clear line of dialogue');
+        return;
+      }
+      _syncAttempts++;
+      _syncNote.value = 'Not enough dialogue yet — still listening';
+      await Future.delayed(const Duration(seconds: 2));
+      if (!mounted || token != _syncToken || !_autoSync) return;
+      return _beginAutoSync();
+    }
+    _syncNote.value =
+        'Reading that line… the first time also downloads a speech model';
+    final heard = await _readLine(clip.samples, clip.rate);
+    if (!mounted || token != _syncToken || !_autoSync) return;
+    if (heard == null) {
+      _finishSyncNote('Couldn’t read the dialogue from this stream');
       return;
     }
+    final quote = heard.text.replaceAll(RegExp(r'\s+'), ' ').trim();
+    final offset = subtitleLineOffsetMs(
+      transcript: quote,
+      videoMs: clip.videoMs + heard.startMs,
+      cues: _cues,
+    );
+    if (offset == null) {
+      if (_syncAttempts >= 2) {
+        final shown = quote.length > 80 ? '${quote.substring(0, 77)}…' : quote;
+        _finishSyncNote(shown.isEmpty
+            ? 'Couldn’t hear a clear line of dialogue'
+            : 'Heard “$shown” but couldn’t find that line in the subtitles');
+        return;
+      }
+      _syncAttempts++;
+      _syncNote.value = 'That line wasn’t in the subtitles — listening again';
+      await Future.delayed(const Duration(seconds: 1));
+      if (!mounted || token != _syncToken || !_autoSync) return;
+      return _beginAutoSync();
+    }
+    _syncAttempts = 0;
     _syncOffsetMs = offset;
     final secs = (offset.abs() / 1000).toStringAsFixed(1);
-    _syncNote.value = offset == 0
+    _finishSyncNote(offset == 0
         ? 'Already lined up'
         : offset > 0
             ? 'Shifted ${secs}s earlier'
-            : 'Shifted ${secs}s later';
+            : 'Shifted ${secs}s later');
     if (_iosNative && _subIndex >= 0) _applyIosTextTrack(_cues, _subIndex);
     await _persistSubPref(_subIndex);
     if (mounted) setState(() {});
-  }
-
-  /// Best constant shift, in ms, so subtitle cues line up with speech.
-  /// Positive means the file is late (show cues earlier). Null when there
-  /// isn't enough speech to trust a result.
-  int? _offsetFromSpeech(Map<int, double> energy, List<SubtitleCue> cues) {
-    if (energy.length < 80 || cues.isEmpty) return null;
-    final keys = energy.keys.toList()..sort();
-    final levels = energy.values.toList()..sort();
-    final noise = levels[levels.length ~/ 2];
-    final speechCut = math.max(noise * 1.6, 4.0);
-    final speech = <int>{};
-    for (final e in energy.entries) {
-      if (e.value >= speechCut) speech.add(e.key);
-    }
-    if (speech.length < 25) return null;
-    final minBin = keys.first - 120;
-    final maxBin = keys.last + 120;
-    bool cueAt(int bin) {
-      final t = Duration(milliseconds: bin * 100);
-      for (final c in cues) {
-        if (t >= c.start && t <= c.end) return true;
-        if (c.start > t) return false;
-      }
-      return false;
-    }
-
-    var bestLag = 0;
-    var best = -1.0;
-    var atZero = 0.0;
-    for (var lag = -120; lag <= 120; lag++) {
-      var hits = 0;
-      for (final bin in speech) {
-        final j = bin + lag;
-        if (j < minBin || j > maxBin) continue;
-        if (cueAt(j)) hits++;
-      }
-      final score = hits / speech.length;
-      if (lag == 0) atZero = score;
-      if (score > best) {
-        best = score;
-        bestLag = lag;
-      }
-    }
-    if (best < 0.15) return null;
-    if (bestLag != 0 && best < atZero + 0.06) return 0;
-    return bestLag * 100;
   }
 
   // ---- iOS native subtitle track (WebVTT) --------------------------------
@@ -824,6 +938,54 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
     return '${two(h)}:${two(m)}:${two(s)}.$milli';
   }
 
+  /// Reads an SRT (or VTT/ASS) the viewer picks and plays it with the same
+  /// timing controls as a downloaded track, including auto-sync.
+  Future<bool> _uploadSubtitle() async {
+    const group = XTypeGroup(
+      label: 'subtitles',
+      extensions: ['srt', 'vtt', 'ass', 'ssa'],
+    );
+    final XFile? file;
+    try {
+      file = await openFile(acceptedTypeGroups: [group]);
+    } catch (_) {
+      _snack('Couldn’t open that subtitle file');
+      return false;
+    }
+    if (file == null || !mounted) return false;
+    List<SubtitleCue> cues;
+    try {
+      cues = parseSubtitleBytes(await file.readAsBytes());
+    } catch (_) {
+      cues = const [];
+    }
+    if (!mounted) return false;
+    if (cues.isEmpty) {
+      _snack('Couldn’t read any lines from that subtitle');
+      return false;
+    }
+    final rawName = file.name.trim();
+    var label = rawName.isEmpty ? 'Uploaded' : rawName;
+    var n = 2;
+    while (_subs.any((s) => s.label == label) ||
+        _uploaded.any((s) => s.label == label)) {
+      label = '${rawName.isEmpty ? 'Uploaded' : rawName} $n';
+      n++;
+    }
+    final id = 'upload:${_uploaded.length}';
+    final opt = SubtitleOption(
+      uri: id,
+      label: label,
+      language: detectLanguage(label),
+    );
+    _uploaded.add(opt);
+    _uploadedCues[id] = cues;
+    setState(() => _subs = [..._subs, opt]);
+    await _selectSubtitle(_subs.length - 1);
+    if (mounted) _snack('Subtitle added');
+    return true;
+  }
+
   Future<void> _showSubtitleMenu() async {
     final wasPlaying = _playing;
     _hideTimer?.cancel();
@@ -837,10 +999,14 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
         autoSync: _autoSync,
         note: _syncNote,
         onAutoSync: _setAutoSync,
+        onUpload: _uploadSubtitle,
       ),
     );
     if (picked != null) _selectSubtitle(picked - 1); // -1 = Off
-    if (wasPlaying) _restartHideTimer();
+    if (wasPlaying) {
+      _restartHideTimer();
+      if (_video.paused) _video.play();
+    }
   }
 
   // ---- quality -----------------------------------------------------------
@@ -948,19 +1114,25 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
     navBack(context, fallback: fb);
   }
 
-  // Keep the address bar on the episode actually playing. Episode nav happens
-  // in-place; use go_router's `replace` (NOT a raw history.replaceState, which
-  // desyncs go_router and breaks the browser Back button) so the player stays a
-  // single history entry — Back returns to the details page, not a prior
-  // episode — while share/refresh still reflect the current episode.
+  // Keep the address bar on the episode actually playing without adding a
+  // history entry. Back then leaves the player for details, instead of
+  // stepping through earlier episodes. Refresh and share still use this URL.
   void _syncEpisodeUrl(int season, int episode) {
     if (_a.type != 'tv' || _a.tmdbId == null || !mounted) return;
-    context.replace(watchLocation(
+    final loc = watchLocation(
       type: 'tv',
       tmdbId: _a.tmdbId!,
       season: season,
       episode: episode,
-    ));
+    );
+    final here = GoRouterState.of(context).uri;
+    final next = Uri.parse(loc);
+    if (here.path == next.path &&
+        here.queryParameters['s'] == next.queryParameters['s'] &&
+        here.queryParameters['e'] == next.queryParameters['e']) {
+      return;
+    }
+    Router.neglect(context, () => context.replace(loc));
   }
 
   // ---- Fullscreen --------------------------------------------------------
@@ -997,9 +1169,11 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   void dispose() {
     _syncToken++;
     _syncNote.dispose();
+    SubtitlePrefStore.revision.removeListener(_onRemoteSubtitle);
     _ticker?.cancel();
     _hideTimer?.cancel();
     _saveProgress();
+    PlayerRuntime.leftAt = _now;
     PlayerRuntime.isOpen = false;
     web.document.removeEventListener('fullscreenchange', _fsListener);
     _clearIosTextTrack();
@@ -1051,6 +1225,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
               ),
             ),
             if (!_iosNative && _cueText != null) _subtitleOverlay(),
+            if (_autoSync) _syncStatus(),
             if (_errorMsg == null && !_loading && _actionKind != null)
               PointerInterceptor(child: _skipActionOverlay()),
             if (_loading) _loaderOverlay(),
@@ -1147,6 +1322,51 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
           ],
         ),
       );
+
+  /// Small status while captions are being lined up. It does not block the
+  /// movie, and it goes away a few seconds after a result.
+  Widget _syncStatus() {
+    return Positioned(
+      top: 28,
+      left: 24,
+      right: 24,
+      child: IgnorePointer(
+        child: ValueListenableBuilder<String>(
+          valueListenable: _syncNote,
+          builder: (_, text, _) {
+            if (text.isEmpty) return const SizedBox.shrink();
+            return Align(
+              alignment: Alignment.topCenter,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Colors.black87,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  child: Text(
+                    text,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white, fontSize: 13),
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  void _finishSyncNote(String text) {
+    _syncNote.value = text;
+    final token = _syncToken;
+    Future.delayed(const Duration(seconds: 4), () {
+      if (!mounted || token != _syncToken) return;
+      if (_syncNote.value == text) _syncNote.value = '';
+    });
+  }
 
   Widget _subtitleOverlay() {
     // Same sizing as the Android player: a fraction of screen width, so a
@@ -1384,20 +1604,23 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
                         color: Colors.white),
                   ),
                 ],
-                if (_subs.isNotEmpty) ...[
-                  IconButton(
-                    onPressed: _showSubtitleMenu,
-                    tooltip: _subIndex < 0
-                        ? 'Subtitles'
-                        : 'Subtitles: ${_subs[_subIndex].label}',
-                    icon: Icon(
-                      _subIndex < 0
-                          ? Icons.closed_caption_off_outlined
-                          : Icons.closed_caption,
-                      color: _subIndex < 0 ? Colors.white70 : Colors.white,
-                    ),
+                IconButton(
+                  onPressed: _showSubtitleMenu,
+                  tooltip: _subIndex < 0
+                      ? 'Subtitles'
+                      : 'Subtitles: ${_subs[_subIndex].label}',
+                  icon: Icon(
+                    _subIndex < 0
+                        ? Icons.closed_caption_off_outlined
+                        : Icons.closed_caption,
+                    color: _subIndex < 0 ? Colors.white70 : Colors.white,
                   ),
-                ],
+                ),
+                IconButton(
+                  onPressed: _uploadSubtitle,
+                  tooltip: 'Upload SRT',
+                  icon: const Icon(Icons.upload_file, color: Colors.white),
+                ),
                 IconButton(
                   onPressed: _toggleFullscreen,
                   tooltip: _fullscreen ? 'Exit full screen' : 'Full screen',
@@ -1540,7 +1763,7 @@ class _SkipButtonState extends State<_SkipButton> {
   }
 }
 
-/// Subtitle list plus an optional auto-sync toggle. Pops the chosen row.
+/// Subtitle list plus auto-sync. Pops the chosen row.
 class _SubtitleMenu extends StatefulWidget {
   const _SubtitleMenu({
     required this.labels,
@@ -1548,12 +1771,14 @@ class _SubtitleMenu extends StatefulWidget {
     required this.autoSync,
     required this.note,
     required this.onAutoSync,
+    required this.onUpload,
   });
   final List<String> labels;
   final int current;
   final bool autoSync;
   final ValueNotifier<String> note;
   final ValueChanged<bool> onAutoSync;
+  final Future<bool> Function() onUpload;
 
   @override
   State<_SubtitleMenu> createState() => _SubtitleMenuState();
@@ -1607,25 +1832,36 @@ class _SubtitleMenuState extends State<_SubtitleMenu> {
                   ),
                 ),
                 const Divider(height: 1, color: Colors.white24),
+                _MenuRow(
+                  label: 'Upload SRT',
+                  selected: false,
+                  onTap: () async {
+                    final added = await widget.onUpload();
+                    if (added && context.mounted) Navigator.pop(context);
+                  },
+                ),
+                const Divider(height: 1, color: Colors.white24),
                 CheckboxListTile(
                   value: _autoSync,
                   onChanged: (v) {
                     final on = v ?? false;
                     setState(() => _autoSync = on);
                     widget.onAutoSync(on);
+                    // Leave the menu so the movie stays visible while it listens.
+                    if (on && widget.current > 0) Navigator.pop(context);
                   },
                   activeColor: Colors.white,
                   checkColor: Colors.black,
                   dense: true,
                   title: const Text(
-                    'Auto-sync timing',
+                    'Auto-sync timing (Beta)',
                     style: TextStyle(color: AppColors.textPrimary, fontSize: 15),
                   ),
                   subtitle: ValueListenableBuilder<String>(
                     valueListenable: widget.note,
                     builder: (_, text, _) => Text(
                       text.isEmpty
-                          ? 'Shift captions to match the audio when the file is early or late.'
+                          ? 'Hears one line, finds it in the subtitles, and shifts the timing. You can keep watching.'
                           : text,
                       style: const TextStyle(
                           color: AppColors.textSecondary, fontSize: 12),

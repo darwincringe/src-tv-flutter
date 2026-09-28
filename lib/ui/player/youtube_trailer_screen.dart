@@ -2,10 +2,10 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:youtube_player_iframe/youtube_player_iframe.dart';
 
+import '../../core/navigation.dart';
 import '../../data/tmdb/image_urls.dart';
 import 'player_args.dart';
 
@@ -158,7 +158,7 @@ class _YoutubeTrailerScreenState extends State<YoutubeTrailerScreen> {
     // (WSA can deliver one back press as both a key event and a system pop).
     PlayerRuntime.backGuardUntil =
         DateTime.now().millisecondsSinceEpoch + 600;
-    context.pop();
+    navBack(context);
   }
 
   void _move(int delta) {

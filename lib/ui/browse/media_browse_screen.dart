@@ -7,6 +7,7 @@ import '../../core/navigation.dart';
 import '../../data/models/media_details.dart';
 import '../../data/models/media_item.dart';
 import '../../data/repository/media_repository.dart';
+import '../../data/store/recommendation_seeds.dart';
 import '../../data/store/watch_progress.dart';
 import '../widgets/branded_loader.dart';
 import '../widgets/category_row.dart';
@@ -49,6 +50,7 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
   int? _heroEpisode;
   Timer? _heroDebounce;
   int _heroReqId = 0;
+  int _personalGen = 0;
 
   final FocusNode _firstCardFocus = FocusNode();
 
@@ -59,23 +61,23 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
     // Refresh Continue Watching whenever playback progress changes — this fires
     // on returning from the player (in-app navigation, which is NOT an app
     // resume) so the row updates immediately after watching something.
-    WatchProgressStore.revision.addListener(_onProgressChanged);
+    WatchProgressStore.revision.addListener(_onAccountData);
+    RecommendationSeeds.revision.addListener(_onAccountData);
     _load();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    WatchProgressStore.revision.removeListener(_onProgressChanged);
+    WatchProgressStore.revision.removeListener(_onAccountData);
+    RecommendationSeeds.revision.removeListener(_onAccountData);
     _heroDebounce?.cancel();
     _firstCardFocus.dispose();
     super.dispose();
   }
 
-  void _onProgressChanged() {
-    if (mounted && _rows != null && widget.showContinueWatching) {
-      _loadPersonalized();
-    }
+  void _onAccountData() {
+    if (mounted && _rows != null) _loadPersonalized();
   }
 
   @override
@@ -107,20 +109,21 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
   }
 
   Future<void> _loadPersonalized() async {
+    final gen = ++_personalGen;
     try {
       final repo = ref.read(mediaRepositoryProvider);
       final rec = await repo.recommended(widget.scope);
       final cw = widget.showContinueWatching
           ? await repo.continueWatching()
           : <WatchProgress>[];
-      if (!mounted) return;
+      if (!mounted || gen != _personalGen) return;
       setState(() {
         _recommended = rec;
         _continueWatching = cw;
         _personalizedReady = true;
       });
     } catch (_) {
-      if (!mounted) return;
+      if (!mounted || gen != _personalGen) return;
       setState(() => _personalizedReady = true);
     }
   }

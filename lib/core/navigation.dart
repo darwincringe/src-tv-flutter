@@ -3,6 +3,7 @@ import 'package:flutter/widgets.dart';
 import 'package:go_router/go_router.dart';
 
 import '../ui/player/player_args.dart';
+import 'history_stub.dart' if (dart.library.html) 'history_web.dart';
 
 /// Navigation helpers. Details and the player are full-screen routes on the
 /// root navigator.
@@ -67,14 +68,31 @@ void playTrailer(BuildContext context, String trailerKey) {
   _navTo(context, '/trailer/$trailerKey');
 }
 
-/// Back for the full-screen routes. Native: pop the push stack (unchanged TV
-/// behaviour). Web: we navigate with `go`, which leaves nothing to pop and has
-/// unreliable browser-history semantics, so go to a deterministic parent
-/// ([fallback], default Home) — e.g. the player returns to its details page.
+/// One step back.
+///
+/// Web history is the source of truth: Back pops it, the same as the browser
+/// button, so the player returns to details and details returns to Home,
+/// Search, or whichever screen opened it. [go] is not used for that pop — it
+/// would push another copy of the parent and the next Back would return here.
+///
+/// [fallback] is only for a page opened directly (nothing behind it). Native
+/// still pops the push stack.
+/// Browser-only. Native is a no-op; the navigator stack is the history there.
+void installAppHistoryGuard({
+  required Listenable listenable,
+  required String Function() currentUri,
+}) {
+  installWebHistoryGuard(listenable: listenable, currentUri: currentUri);
+}
+
 void navBack(BuildContext context, {String fallback = '/home'}) {
-  if (context.canPop()) {
+  if (kIsWeb && platformCanHistoryBack()) {
+    platformHistoryBack();
+    return;
+  }
+  if (!kIsWeb && context.canPop()) {
     context.pop();
     return;
   }
-  context.go(fallback);
+  Router.neglect(context, () => context.go(fallback));
 }

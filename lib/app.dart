@@ -5,7 +5,9 @@ import 'package:flutter/material.dart';
 import 'core/navigation.dart';
 import 'core/router.dart';
 import 'core/theme.dart';
+import 'data/auth/auth_service.dart';
 import 'data/store/active_playback.dart';
+import 'data/sync/sync_service.dart';
 import 'ui/player/player_args.dart';
 
 /// Root widget. Observes the app lifecycle so that resuming while a stream was
@@ -35,6 +37,10 @@ class _SrcTvAppState extends State<SrcTvApp> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    installAppHistoryGuard(
+      listenable: appRouter.routeInformationProvider,
+      currentUri: () => appRouter.routeInformationProvider.value.uri.toString(),
+    );
   }
 
   @override
@@ -46,6 +52,7 @@ class _SrcTvAppState extends State<SrcTvApp> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed) return;
+    if (AuthService.isSignedIn) SyncService.sync();
     if (!ActivePlayback.isActive() || PlayerRuntime.isOpen) return;
     // Don't re-open a player the user just backed out of (a transient
     // inactive→resumed around the pop would otherwise stack a second player

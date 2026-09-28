@@ -6,10 +6,10 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
+import '../../core/navigation.dart';
 import '../../core/theme.dart';
 import '../../data/introdb/introdb_client.dart';
 import '../../data/models/details_dto.dart';
@@ -17,6 +17,7 @@ import '../../data/repository/media_repository.dart';
 import '../../data/store/active_playback.dart';
 import '../../data/store/subtitle_pref.dart';
 import '../../data/store/watch_progress.dart';
+import '../../data/sync/sync_service.dart';
 import '../../data/tmdb/image_urls.dart';
 import '../../data/youtube/youtube_extractor.dart';
 import 'player_args.dart';
@@ -141,6 +142,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   void initState() {
     super.initState();
     PlayerRuntime.isOpen = true;
+    SubtitlePrefStore.revision.addListener(_onRemoteSubtitle);
+    SyncService.pullSubtitlePrefs();
     WidgetsBinding.instance.addObserver(this);
 
     final a = widget.args;
@@ -458,11 +461,21 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   Future<void> _selectSubtitle(int index, {bool remember = true}) async {
     _activeSubIndex = index;
     final token = ++_subLoadToken;
+    final prev = SubtitlePrefStore.get(_type, _tmdbId, _season);
     if (index < 0) {
       if (mounted) setState(() => _cues = []);
       if (remember) {
         await SubtitlePrefStore.save(
-            _type, _tmdbId, _season, const SubtitlePref(off: true));
+          _type,
+          _tmdbId,
+          _season,
+          SubtitlePref(
+            off: true,
+            name: prev?.name,
+            language: prev?.language,
+            offsetMs: prev?.offsetMs ?? 0,
+          ),
+        );
       }
       return;
     }
@@ -470,10 +483,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     final opt = _subOptions[index];
     if (remember) {
       await SubtitlePrefStore.save(
-          _type,
-          _tmdbId,
-          _season,
-          SubtitlePref(name: opt.label, language: subtitlePrefLanguage(opt)));
+        _type,
+        _tmdbId,
+        _season,
+        SubtitlePref(
+          name: opt.label,
+          language: subtitlePrefLanguage(opt),
+          offsetMs: prev?.offsetMs ?? 0,
+        ),
+      );
     }
     // The subtitle host (OpenSubtitles) intermittently rate-limits back-to-back
     // requests — especially right after auto-advancing an episode — so a single
@@ -788,11 +806,25 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     });
   }
 
+  /// Another signed-in device saved a different track for this title. Switch
+  /// to it without writing back.
+  void _onRemoteSubtitle() {
+    if (!mounted || _subOptions.isEmpty) return;
+    final pref = SubtitlePrefStore.get(_type, _tmdbId, _season);
+    final idx = rememberedSubtitleIndex(_subOptions, pref);
+    if (idx == null || idx == _activeSubIndex) return;
+    _selectSubtitle(idx, remember: false);
+  }
+
   /// Current subtitle text for the active track, from our own parsed cues at
   /// the current position (rendered by us for a bold/shadow Netflix look).
+  /// The stored shift for this title — including one measured on the website —
+  /// is applied so the phone shows the same timing.
   String? _currentSubtitleText() {
     if (_cues.isEmpty) return null;
-    final pos = _position;
+    final offset =
+        SubtitlePrefStore.get(_type, _tmdbId, _season)?.offsetMs ?? 0;
+    final pos = _position + Duration(milliseconds: offset);
     for (final c in _cues) {
       if (pos >= c.start && pos <= c.end) {
         final t = c.text.trim();
@@ -838,31 +870,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     return null;
   }
 
-  /// The position at which the title counts as "finished". For episodes with
-  /// introdb data this is the outro start (the credits); otherwise — and always
-  /// for movies — it's 95% of the runtime.
-  int _completionThresholdMs() {
-    final dur = _duration.inMilliseconds;
-    final outro = _segments?.outro;
-    if (_isTv && outro != null && (dur <= 0 || outro.startMs > dur * 0.5)) {
-      return outro.startMs;
-    }
-    return (dur * 0.95).round();
-  }
-
   void _saveProgress() {
     if (_mode != PlayerMode.stream) return;
     if (!_resumeDone) return;
     final pos = _position.inMilliseconds;
     final dur = _duration.inMilliseconds;
     if (dur <= 0) return;
-    // If we're already at/after the credits (the "Next Episode" affordance is
-    // showing, or we've passed the completion point), treat the episode as done
-    // so resuming later starts the NEXT episode — not this one from the top.
-    if (_actionKind == 'next' || pos >= _completionThresholdMs()) {
-      _markReachedEnd();
-      return;
-    }
+    // Closing or the periodic save keeps this episode, even in the credits.
+    // Only the file actually ending (_onCompleted) advances or finishes the series.
     WatchProgressStore.save(WatchProgress(
       tmdbId: _tmdbId,
       type: _type,
@@ -1059,6 +1074,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }
   }
 
+  void _leavePlayer() {
+    navBack(context, fallback: '/details/$_type/$_tmdbId');
+  }
+
   Future<bool> _confirmExit() async {
     _controller?.pause();
     final leave = await showDialog<bool>(
@@ -1099,6 +1118,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   @override
   void dispose() {
     _disposed = true;
+    SubtitlePrefStore.revision.removeListener(_onRemoteSubtitle);
     PlayerRuntime.isOpen = false;
     _tick?.cancel();
     _hideTimer?.cancel();
@@ -1137,7 +1157,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         }
         final leave = await _confirmExit();
         if (!context.mounted) return;
-        if (leave) context.pop();
+        if (leave) _leavePlayer();
       },
       child: Scaffold(
         backgroundColor: Colors.black,
@@ -1405,7 +1425,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   _leaving = true;
                   PlayerRuntime.leftAt = _now;
                   ActivePlayback.clear();
-                  if (mounted) context.pop();
+                  if (mounted) _leavePlayer();
                 },
               ),
             ],
@@ -1467,7 +1487,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                     onTap: () async {
                       final leave = await _confirmExit();
                       if (!mounted) return;
-                      if (leave) context.pop();
+                      if (leave) _leavePlayer();
                     },
                   ),
                   const SizedBox(width: 8),

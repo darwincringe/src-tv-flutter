@@ -42,11 +42,15 @@ Future<List<SubtitleCue>> loadSubtitleCues(String uri, {String? userAgent}) asyn
     } else {
       bytes = await readLocalBytes(uri);
     }
-    return parseSubtitles(_decode(maybeGunzip(bytes)));
+    return parseSubtitleBytes(bytes);
   } catch (_) {
     return const [];
   }
 }
+
+/// Parses subtitle bytes already in memory (an uploaded SRT, VTT, or ASS file).
+List<SubtitleCue> parseSubtitleBytes(List<int> bytes) =>
+    parseSubtitles(_decode(maybeGunzip(bytes)));
 
 String _decode(List<int> bytes) {
   try {
