@@ -187,13 +187,6 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   Timer? _ticker;
   Timer? _hideTimer;
   int _ticks = 0;
-  // Playback clock has not moved while the browser is still buffering.
-  int? _stallSinceMs;
-  int _lastMovingPosMs = -1;
-  int _stallReloads = 0;
-  bool _stallReloadBusy = false;
-  int? _forcedResumeMs;
-  static const int _stallLimitMs = 12000;
 
   PlayerArgs get _a => widget.args;
   int get _now => DateTime.now().millisecondsSinceEpoch;
@@ -291,13 +284,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
       }
 
       _computeEpisodeRefs();
-      if (_forcedResumeMs != null) {
-        _resumeTargetMs = _forcedResumeMs!;
-        _forcedResumeMs = null;
-        _metadataSeekDone = _resumeTargetMs <= 0;
-      } else {
-        _resumeTargetMs = _savedResumePosition();
-      }
+      _resumeTargetMs = _savedResumePosition();
       _resumeDone = _resumeTargetMs <= 0;
       _subs = [...apiSubtitleOptions(res.subtitles), ..._uploaded];
       // Apply the remembered choice (per-season for TV / per-title for movies),
@@ -438,8 +425,6 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
       _episodeName = null;
       _loading = true;
       _metadataSeekDone = false;
-      _stallSinceMs = null;
-      _stallReloads = 0;
       _durationMs = 0;
       _positionMs = 0;
       _bufferedFraction = 0;
@@ -500,58 +485,6 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
     }
   }
 
-  /// The browser is still waiting on data and the clock has not moved. Fetch
-  /// the stream again and reopen it at the same timestamp.
-  void _watchForStall() {
-    if (_loading || _stallReloadBusy || _a.mode != PlayerMode.stream) {
-      _stallSinceMs = null;
-      return;
-    }
-    if (_video.paused || _video.ended) {
-      _stallSinceMs = null;
-      return;
-    }
-    if (_positionMs > _lastMovingPosMs + 300) {
-      _lastMovingPosMs = _positionMs;
-      _stallSinceMs = null;
-      _stallReloads = 0;
-      return;
-    }
-    // readyState < HAVE_FUTURE_DATA means the next frame is not buffered.
-    if (_video.readyState >= 3) {
-      _stallSinceMs = null;
-      return;
-    }
-    _stallSinceMs ??= _now;
-    if (_now - _stallSinceMs! >= _stallLimitMs) {
-      _stallSinceMs = null;
-      _reloadAfterStall();
-    }
-  }
-
-  Future<void> _reloadAfterStall() async {
-    if (_stallReloadBusy || !mounted || _loading) return;
-    if (_stallReloads >= 3) {
-      setState(() {
-        _errorMsg = 'Playback stalled';
-        _loading = false;
-      });
-      return;
-    }
-    _stallReloads++;
-    _stallReloadBusy = true;
-    _forcedResumeMs = _positionMs;
-    setState(() {
-      _loading = true;
-      _errorMsg = null;
-    });
-    try {
-      await _load();
-    } finally {
-      _stallReloadBusy = false;
-    }
-  }
-
   void _startTicker() {
     _ticker?.cancel();
     _ticks = 0;
@@ -570,7 +503,6 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
 
       _ticks++;
       if (_ticks % 60 == 0) _saveProgress(); // ~30s
-      _watchForStall();
 
       final action = _computeActionKind();
       final changed = action != _actionKind;

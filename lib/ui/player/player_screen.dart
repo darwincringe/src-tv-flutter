@@ -111,14 +111,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   // A timeline seek buffers too, but that must not cover the video with the
   // episode poster. Cleared when the seek's buffer ends.
   bool _hideSeekBuffer = false;
-  // Position has not moved while we expected playback. After [_stallLimit]
-  // the stream is treated as stuck and fetched again.
-  int? _stallSinceMs;
-  int _lastMovingPosMs = -1;
-  int _stallReloads = 0;
-  bool _stallReloadBusy = false;
-  int? _forcedResumeMs;
-  static const int _stallLimitMs = 12000;
   String? _errorMsg;
   bool _showControls = true;
   bool _playing = false;
@@ -284,7 +276,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         // resumes on its own (STATE_READY).
         _bufferDebounce?.cancel();
         _hideSeekBuffer = false;
-        _stallSinceMs = null;
         if (_buffering && mounted) setState(() => _buffering = false);
         break;
       case BetterPlayerEventType.exception:
@@ -402,12 +393,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       if (_type == 'tv' && _season != null && _episode != null) {
         _fetchSegments(_season!, _episode!);
       }
-      if (_forcedResumeMs != null) {
-        _resumeTargetMs = _forcedResumeMs!;
-        _forcedResumeMs = null;
-      } else {
-        _resumeTargetMs = _savedResumePosition();
-      }
+      _resumeTargetMs = _savedResumePosition();
       _resumeDone = _resumeTargetMs <= 0;
 
       _setupSubtitles(res.subtitles);
@@ -781,8 +767,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       _loadProgress = 0;
       _episodeStillPath = null;
       _hideSeekBuffer = false;
-      _stallSinceMs = null;
-      _stallReloads = 0;
       // Hold the banner + spinner for at least 5s so it's clearly "loading the
       // next episode" instead of the button flashing straight into playback.
       _minLoaderUntilMs = _now + 5000;
@@ -897,7 +881,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       if (subChanged) _subtitleText = sub;
       _ticks++;
       if (_ticks % 60 == 0) _saveProgress(); // every 30s
-      _watchForStall(v.isBuffering);
       if (mounted && (_showControls || subChanged || actionChanged)) {
         setState(() {});
       }
@@ -1033,66 +1016,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   /// and for opening the title — not for dragging the bar.
   void _markTimelineSeek() {
     _hideSeekBuffer = true;
-    _stallSinceMs = null;
     _bufferDebounce?.cancel();
     if (_buffering && mounted) setState(() => _buffering = false);
-  }
-
-  /// Playback has not moved while the player is buffering. Fetch the stream
-  /// again and reopen it at the same timestamp.
-  void _watchForStall(bool isBuffering) {
-    if (_loading ||
-        _scrubbing ||
-        _backgrounded ||
-        _stallReloadBusy ||
-        _disposed ||
-        _mode != PlayerMode.stream) {
-      _stallSinceMs = null;
-      return;
-    }
-    final pos = _position.inMilliseconds;
-    if (pos > _lastMovingPosMs + 300) {
-      _lastMovingPosMs = pos;
-      _stallSinceMs = null;
-      _stallReloads = 0;
-      return;
-    }
-    // A manual pause, including a D-pad seek that stays paused, freezes the
-    // clock on purpose. Only reload when playback was supposed to continue.
-    if (!_playing || !(_buffering || isBuffering)) {
-      _stallSinceMs = null;
-      return;
-    }
-    _stallSinceMs ??= _now;
-    if (_now - _stallSinceMs! >= _stallLimitMs) {
-      _stallSinceMs = null;
-      _reloadAfterStall();
-    }
-  }
-
-  Future<void> _reloadAfterStall() async {
-    if (_stallReloadBusy || _disposed || _loading) return;
-    if (_stallReloads >= 3) {
-      if (mounted) {
-        setState(() {
-          _errorMsg = 'Playback stalled';
-          _loading = false;
-          _buffering = false;
-        });
-      }
-      return;
-    }
-    _stallReloads++;
-    _stallReloadBusy = true;
-    _forcedResumeMs = _position.inMilliseconds;
-    _hideSeekBuffer = false;
-    _bufferDebounce?.cancel();
-    _minLoaderUntilMs = _now;
-    try {
-      await _resolveAndPlay();
-    } finally {
-      _stallReloadBusy = false;
-    }
   }
 
   void _seekBy(int deltaMs) {
