@@ -7,6 +7,7 @@ import 'core/url_strategy.dart'
 import 'data/auth/auth_service.dart';
 import 'data/store/active_playback.dart';
 import 'data/store/library_store.dart';
+import 'data/store/mirror_pref.dart';
 import 'data/store/recommendation_seeds.dart';
 import 'data/store/subtitle_pref.dart';
 import 'data/store/watch_progress.dart';
@@ -27,6 +28,7 @@ Future<void> main() async {
   await ActivePlayback.init();
   await RecommendationSeeds.init();
   await SubtitlePrefStore.init();
+  await MirrorPrefStore.init();
   await AuthService.init();
   // Wire the local stores to the account (no-op while signed out).
   SyncService.init();

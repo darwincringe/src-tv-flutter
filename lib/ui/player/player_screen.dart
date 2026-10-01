@@ -15,11 +15,15 @@ import '../../data/introdb/introdb_client.dart';
 import '../../data/models/details_dto.dart';
 import '../../data/repository/media_repository.dart';
 import '../../data/store/active_playback.dart';
+import '../../data/store/mirror_pref.dart';
 import '../../data/store/subtitle_pref.dart';
 import '../../data/store/watch_progress.dart';
+import '../../data/stream/extract_response.dart';
+import '../../data/stream/mirror_choice.dart';
 import '../../data/sync/sync_service.dart';
 import '../../data/tmdb/image_urls.dart';
 import '../../data/youtube/youtube_extractor.dart';
+import 'mirror_bar.dart';
 import 'player_args.dart';
 import 'subtitle_config.dart';
 import 'subtitle_parser.dart';
@@ -104,6 +108,17 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   // playback until it has buffered a stable amount, then auto-resumes.
   bool _buffering = false;
   Timer? _bufferDebounce; // ignore momentary buffer blips before showing it
+  // A timeline seek buffers too, but that must not cover the video with the
+  // episode poster. Cleared when the seek's buffer ends.
+  bool _hideSeekBuffer = false;
+  // Position has not moved while we expected playback. After [_stallLimit]
+  // the stream is treated as stuck and fetched again.
+  int? _stallSinceMs;
+  int _lastMovingPosMs = -1;
+  int _stallReloads = 0;
+  bool _stallReloadBusy = false;
+  int? _forcedResumeMs;
+  static const int _stallLimitMs = 12000;
   String? _errorMsg;
   bool _showControls = true;
   bool _playing = false;
@@ -128,6 +143,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   final FocusNode _playPauseFocus = FocusNode(debugLabel: 'playpause');
   final FocusNode _seekFocus = FocusNode(debugLabel: 'seek');
   final FocusNode _skipFocus = FocusNode(debugLabel: 'skip');
+  // One node per mirror so D-pad focus survives the control overlay rebuilding.
+  final List<FocusNode> _mirrorNodes = [];
+  List<StreamMirror> _mirrors = const [];
+  int _mirrorIndex = -1;
+  int _sourceToken = 0;
   bool _scrubbing = false; // seek-bar "scrub mode" active
   int _scrubPreviewMs = 0; // marker position while scrubbing (not yet applied)
   bool _wasPlayingBeforeScrub = false;
@@ -247,11 +267,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         break;
       case BetterPlayerEventType.bufferingStart:
         // A rebuffer mid-playback (not the initial load, which _loading covers).
-        // Debounced so a momentary blip doesn't flash the overlay.
+        // Debounced so a momentary blip doesn't flash the overlay. A timeline
+        // seek also buffers; that one stays on the video instead of the poster.
+        if (_hideSeekBuffer || _scrubbing) break;
         if (!_loading && !_disposed) {
           _bufferDebounce?.cancel();
           _bufferDebounce = Timer(const Duration(milliseconds: 400), () {
-            if (mounted && !_loading && !_disposed) {
+            if (mounted && !_loading && !_disposed && !_hideSeekBuffer && !_scrubbing) {
               setState(() => _buffering = true);
             }
           });
@@ -261,6 +283,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         // Enough is buffered to play smoothly — hide the banner; ExoPlayer
         // resumes on its own (STATE_READY).
         _bufferDebounce?.cancel();
+        _hideSeekBuffer = false;
+        _stallSinceMs = null;
         if (_buffering && mounted) setState(() => _buffering = false);
         break;
       case BetterPlayerEventType.exception:
@@ -329,18 +353,26 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   Future<void> _resolveStream() async {
     if (_disposed) return;
+    final token = ++_sourceToken;
     try {
       final repo = ref.read(mediaRepositoryProvider);
-      final res = await repo.streamSource(
-        _type,
-        _tmdbId,
-        season: _season,
-        episode: _episode,
+      final playback = await resolvePlayback(
+        preferred: MirrorPrefStore.get(_type, _tmdbId),
+        extract: (source) => repo.streamSource(
+          _type,
+          _tmdbId,
+          season: _season,
+          episode: _episode,
+          source: source,
+        ),
       );
-      if (!res.success || (res.hlsUrl?.isEmpty ?? true)) {
-        _retryOrError(res.error ?? 'No playable source found');
+      if (token != _sourceToken || _disposed) return;
+      if (playback == null) {
+        _retryOrError('No playable source found');
         return;
       }
+      final res = playback.response;
+      _applyMirrors(res.mirrors, playback.index);
 
       if (_mediaTitle == null) {
         try {
@@ -353,6 +385,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           if (mounted) setState(() {}); // show the backdrop on the loader
         } catch (_) {}
       }
+      if (token != _sourceToken || _disposed) return;
       if (_type == 'tv' && _episode != null) {
         try {
           final eps = await repo.episodes(_tmdbId, _season ?? 1);
@@ -369,36 +402,18 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       if (_type == 'tv' && _season != null && _episode != null) {
         _fetchSegments(_season!, _episode!);
       }
-      _resumeTargetMs = _savedResumePosition();
+      if (_forcedResumeMs != null) {
+        _resumeTargetMs = _forcedResumeMs!;
+        _forcedResumeMs = null;
+      } else {
+        _resumeTargetMs = _savedResumePosition();
+      }
       _resumeDone = _resumeTargetMs <= 0;
 
       _setupSubtitles(res.subtitles);
       _controller ??= _buildController();
-      await _controller!.setupDataSource(
-        BetterPlayerDataSource(
-          BetterPlayerDataSourceType.network,
-          res.hlsUrl!,
-          videoFormat: BetterPlayerVideoFormat.hls,
-          headers: const {'User-Agent': _userAgent},
-          // Subtitles are handled entirely by us (fetch + parse + render), not
-          // by better_player — its SRT parser crashes on 3+ line cues.
-          useAsmsSubtitles: false,
-          useAsmsTracks: true,
-          // Buffer far ahead (target ~10 min) so a shaky source (e.g. The
-          // Office S4E8) rides through stalls; after a rebuffer, wait for a
-          // solid ~12s cushion before resuming so it doesn't immediately stall
-          // again. The time target is bounded by an 80 MB byte cap in the
-          // vendored player's LoadControl (see BetterPlayer.kt) because the
-          // buffer lives in the Java heap and would otherwise OOM the box: full
-          // 10 min at lower bitrates, ~2 min at 1080p, whichever hits 80 MB.
-          bufferingConfiguration: const BetterPlayerBufferingConfiguration(
-            minBufferMs: 120000,
-            maxBufferMs: 600000,
-            bufferForPlaybackMs: 3000,
-            bufferForPlaybackAfterRebufferMs: 12000,
-          ),
-        ),
-      );
+      await _controller!.setupDataSource(_hlsSource(playback.url));
+      if (token != _sourceToken) return;
       // If the user backed out while the source was still preparing, tear the
       // controller down here and don't start anything — otherwise it would sit
       // ready and (previously) auto-play on a screen that no longer exists.
@@ -415,7 +430,86 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         await _controller?.setVolume(0);
       }
     } catch (_) {
+      if (token != _sourceToken) return;
       _retryOrError('Playback error');
+    }
+  }
+
+  BetterPlayerDataSource _hlsSource(String url) {
+    return BetterPlayerDataSource(
+      BetterPlayerDataSourceType.network,
+      url,
+      videoFormat: BetterPlayerVideoFormat.hls,
+      headers: const {'User-Agent': _userAgent},
+      // Subtitles are handled entirely by us (fetch + parse + render), not
+      // by better_player — its SRT parser crashes on 3+ line cues.
+      useAsmsSubtitles: false,
+      useAsmsTracks: true,
+      // Buffer far ahead (target ~10 min) so a shaky source (e.g. The
+      // Office S4E8) rides through stalls; after a rebuffer, wait for a
+      // solid ~12s cushion before resuming so it doesn't immediately stall
+      // again. The time target is bounded by an 80 MB byte cap in the
+      // vendored player's LoadControl (see BetterPlayer.kt) because the
+      // buffer lives in the Java heap and would otherwise OOM the box: full
+      // 10 min at lower bitrates, ~2 min at 1080p, whichever hits 80 MB.
+      bufferingConfiguration: const BetterPlayerBufferingConfiguration(
+        minBufferMs: 120000,
+        maxBufferMs: 600000,
+        bufferForPlaybackMs: 3000,
+        bufferForPlaybackAfterRebufferMs: 12000,
+      ),
+    );
+  }
+
+  void _applyMirrors(List<StreamMirror> mirrors, int index) {
+    _mirrors = mirrors;
+    _mirrorIndex = index;
+    while (_mirrorNodes.length < mirrors.length) {
+      _mirrorNodes.add(FocusNode(debugLabel: 'mirror${_mirrorNodes.length}'));
+    }
+    while (_mirrorNodes.length > mirrors.length) {
+      _mirrorNodes.removeLast().dispose();
+    }
+  }
+
+  /// Switch mirror without leaving the episode. The choice is saved for this
+  /// movie, or for every season of a TV show. Playback stays on the same
+  /// timestamp.
+  Future<void> _selectMirror(int index) async {
+    if (_loading || index < 0 || index >= _mirrors.length || index == _mirrorIndex) {
+      return;
+    }
+    final mirror = _mirrors[index];
+    final pos = _position.inMilliseconds;
+    await MirrorPrefStore.save(_type, _tmdbId, mirror.source);
+    if (!mounted || _disposed) return;
+    final token = ++_sourceToken;
+    _resumeTargetMs = pos;
+    _resumeDone = pos <= 800;
+    _resumeSeekAtMs = 0;
+    setState(() {
+      _mirrorIndex = index;
+      _loading = true;
+      _loadProgress = 20;
+      _minLoaderUntilMs = _now;
+      _errorMsg = null;
+    });
+    _startLoadProgress();
+    if (pos > 800) {
+      await _controller?.setVolume(0);
+    }
+    if (token != _sourceToken || _disposed) return;
+    try {
+      _controller ??= _buildController();
+      await _controller!.setupDataSource(_hlsSource(mirror.hlsUrl));
+      if (token != _sourceToken || _disposed) return;
+      _restartHideTimer();
+    } catch (_) {
+      if (token != _sourceToken || !mounted) return;
+      setState(() {
+        _errorMsg = 'Playback error';
+        _loading = false;
+      });
     }
   }
 
@@ -686,6 +780,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       _loading = true;
       _loadProgress = 0;
       _episodeStillPath = null;
+      _hideSeekBuffer = false;
+      _stallSinceMs = null;
+      _stallReloads = 0;
       // Hold the banner + spinner for at least 5s so it's clearly "loading the
       // next episode" instead of the button flashing straight into playback.
       _minLoaderUntilMs = _now + 5000;
@@ -800,6 +897,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       if (subChanged) _subtitleText = sub;
       _ticks++;
       if (_ticks % 60 == 0) _saveProgress(); // every 30s
+      _watchForStall(v.isBuffering);
       if (mounted && (_showControls || subChanged || actionChanged)) {
         setState(() {});
       }
@@ -931,6 +1029,72 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   // ---- Controls / seek ---------------------------------------------------
 
+  /// Timeline seeks buffer, but the poster loading screen is for a real stall
+  /// and for opening the title — not for dragging the bar.
+  void _markTimelineSeek() {
+    _hideSeekBuffer = true;
+    _stallSinceMs = null;
+    _bufferDebounce?.cancel();
+    if (_buffering && mounted) setState(() => _buffering = false);
+  }
+
+  /// Playback has not moved while the player is buffering. Fetch the stream
+  /// again and reopen it at the same timestamp.
+  void _watchForStall(bool isBuffering) {
+    if (_loading ||
+        _scrubbing ||
+        _backgrounded ||
+        _stallReloadBusy ||
+        _disposed ||
+        _mode != PlayerMode.stream) {
+      _stallSinceMs = null;
+      return;
+    }
+    final pos = _position.inMilliseconds;
+    if (pos > _lastMovingPosMs + 300) {
+      _lastMovingPosMs = pos;
+      _stallSinceMs = null;
+      _stallReloads = 0;
+      return;
+    }
+    // A manual pause, including a D-pad seek that stays paused, freezes the
+    // clock on purpose. Only reload when playback was supposed to continue.
+    if (!_playing || !(_buffering || isBuffering)) {
+      _stallSinceMs = null;
+      return;
+    }
+    _stallSinceMs ??= _now;
+    if (_now - _stallSinceMs! >= _stallLimitMs) {
+      _stallSinceMs = null;
+      _reloadAfterStall();
+    }
+  }
+
+  Future<void> _reloadAfterStall() async {
+    if (_stallReloadBusy || _disposed || _loading) return;
+    if (_stallReloads >= 3) {
+      if (mounted) {
+        setState(() {
+          _errorMsg = 'Playback stalled';
+          _loading = false;
+          _buffering = false;
+        });
+      }
+      return;
+    }
+    _stallReloads++;
+    _stallReloadBusy = true;
+    _forcedResumeMs = _position.inMilliseconds;
+    _hideSeekBuffer = false;
+    _bufferDebounce?.cancel();
+    _minLoaderUntilMs = _now;
+    try {
+      await _resolveAndPlay();
+    } finally {
+      _stallReloadBusy = false;
+    }
+  }
+
   void _seekBy(int deltaMs) {
     final dur = _duration.inMilliseconds;
     var target = _position.inMilliseconds + deltaMs;
@@ -972,6 +1136,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   // Confirm: now actually seek to the marker (one load), stay paused, and focus
   // play/pause so the user presses play to resume.
   void _commitScrub() {
+    _markTimelineSeek();
     _controller?.seekTo(Duration(milliseconds: _scrubPreviewMs));
     setState(() => _scrubbing = false);
     _playPauseFocus.requestFocus();
@@ -1002,6 +1167,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   void _touchScrubEnd() {
+    _markTimelineSeek();
     _controller?.seekTo(Duration(milliseconds: _scrubPreviewMs));
     if (_wasPlayingBeforeScrub) _controller?.play();
     setState(() => _scrubbing = false);
@@ -1138,6 +1304,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _playPauseFocus.dispose();
     _seekFocus.dispose();
     _skipFocus.dispose();
+    for (final node in _mirrorNodes) {
+      node.dispose();
+    }
     WakelockPlus.disable();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
@@ -1480,18 +1649,33 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           SafeArea(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              child: Row(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _FocusIconButton(
-                    icon: Icons.arrow_back,
-                    onTap: () async {
-                      final leave = await _confirmExit();
-                      if (!mounted) return;
-                      if (leave) _leavePlayer();
-                    },
+                  Row(
+                    children: [
+                      _FocusIconButton(
+                        icon: Icons.arrow_back,
+                        onTap: () async {
+                          final leave = await _confirmExit();
+                          if (!mounted) return;
+                          if (leave) _leavePlayer();
+                        },
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(child: _titleText()),
+                    ],
                   ),
-                  const SizedBox(width: 8),
-                  Expanded(child: _titleText()),
+                  if (isStream && _mirrors.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 52, top: 4),
+                      child: MirrorBar(
+                        mirrors: _mirrors,
+                        selected: _mirrorIndex,
+                        focusNodes: _mirrorNodes,
+                        onSelect: _selectMirror,
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -1573,6 +1757,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                       onTouchScrubTo: _touchScrubTo,
                       onTouchScrubEnd: _touchScrubEnd,
                       onSeekTo: (p) {
+                        _markTimelineSeek();
                         _controller?.seekTo(p);
                         _controller?.play();
                         _restartHideTimer();

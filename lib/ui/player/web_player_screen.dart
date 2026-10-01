@@ -18,9 +18,13 @@ import '../../core/theme.dart';
 import '../../data/introdb/introdb_client.dart';
 import '../../data/models/details_dto.dart';
 import '../../data/repository/media_repository.dart';
+import '../../data/store/mirror_pref.dart';
 import '../../data/store/subtitle_pref.dart';
 import '../../data/store/watch_progress.dart';
+import '../../data/stream/extract_response.dart';
+import '../../data/stream/mirror_choice.dart';
 import '../../data/sync/sync_service.dart';
+import 'mirror_bar.dart';
 import 'player_args.dart';
 import 'subtitle_config.dart';
 import 'subtitle_parser.dart';
@@ -153,6 +157,12 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   MediaSegments? _segments;
   String? _actionKind; // 'intro' | 'recap' | 'next' | null
 
+  // Mirrors for the title currently playing. The saved source is per movie,
+  // or once for a whole TV series (every season).
+  List<StreamMirror> _mirrors = const [];
+  int _mirrorIndex = -1;
+  final List<FocusNode> _mirrorNodes = [];
+
   List<SubtitleOption> _subs = const [];
   final List<SubtitleOption> _uploaded = [];
   final Map<String, List<SubtitleCue>> _uploadedCues = {};
@@ -177,6 +187,13 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   Timer? _ticker;
   Timer? _hideTimer;
   int _ticks = 0;
+  // Playback clock has not moved while the browser is still buffering.
+  int? _stallSinceMs;
+  int _lastMovingPosMs = -1;
+  int _stallReloads = 0;
+  bool _stallReloadBusy = false;
+  int? _forcedResumeMs;
+  static const int _stallLimitMs = 12000;
 
   PlayerArgs get _a => widget.args;
   int get _now => DateTime.now().millisecondsSinceEpoch;
@@ -232,20 +249,26 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
     }
     try {
       final repo = ref.read(mediaRepositoryProvider);
-      final res = await repo.streamSource(
-        _a.type!,
-        _a.tmdbId!,
-        season: _season,
-        episode: _episode,
+      final playback = await resolvePlayback(
+        preferred: MirrorPrefStore.get(_a.type!, _a.tmdbId!),
+        extract: (source) => repo.streamSource(
+          _a.type!,
+          _a.tmdbId!,
+          season: _season,
+          episode: _episode,
+          source: source,
+        ),
       );
       if (!mounted) return;
-      if (!res.success || (res.hlsUrl?.isEmpty ?? true)) {
+      if (playback == null) {
         setState(() {
           _loading = false;
-          _errorMsg = res.error ?? 'No playable source found';
+          _errorMsg = 'No playable source found';
         });
         return;
       }
+      final res = playback.response;
+      _applyMirrors(res.mirrors, playback.index);
 
       // Details once (title, isTv, seasons for episode nav).
       if (_title == null) {
@@ -268,7 +291,13 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
       }
 
       _computeEpisodeRefs();
-      _resumeTargetMs = _savedResumePosition();
+      if (_forcedResumeMs != null) {
+        _resumeTargetMs = _forcedResumeMs!;
+        _forcedResumeMs = null;
+        _metadataSeekDone = _resumeTargetMs <= 0;
+      } else {
+        _resumeTargetMs = _savedResumePosition();
+      }
       _resumeDone = _resumeTargetMs <= 0;
       _subs = [...apiSubtitleOptions(res.subtitles), ..._uploaded];
       // Apply the remembered choice (per-season for TV / per-title for movies),
@@ -276,7 +305,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
       _selectSubtitle(_initialSubtitleIndex(), save: false);
 
       if (!mounted) return;
-      _attach(res.hlsUrl!);
+      _attach(playback.url);
       if (_isTv && _season != null && _episode != null) {
         _fetchSegments(_season!, _episode!);
       }
@@ -290,6 +319,33 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
         });
       }
     }
+  }
+
+  void _applyMirrors(List<StreamMirror> mirrors, int index) {
+    _mirrors = mirrors;
+    _mirrorIndex = index;
+    while (_mirrorNodes.length < mirrors.length) {
+      _mirrorNodes.add(FocusNode(debugLabel: 'mirror${_mirrorNodes.length}'));
+    }
+    while (_mirrorNodes.length > mirrors.length) {
+      _mirrorNodes.removeLast().dispose();
+    }
+  }
+
+  void _selectMirror(int index) {
+    if (_loading || index < 0 || index >= _mirrors.length || index == _mirrorIndex) {
+      return;
+    }
+    final mirror = _mirrors[index];
+    final pos = _positionMs;
+    MirrorPrefStore.save(_a.type!, _a.tmdbId!, mirror.source);
+    // Keep the timestamp across the source change. loadedmetadata applies it.
+    _resumeTargetMs = pos;
+    _metadataSeekDone = pos <= 0;
+    _resumeDone = pos <= 0;
+    setState(() => _mirrorIndex = index);
+    _attach(mirror.hlsUrl);
+    _restartHideTimer();
   }
 
   void _attach(String hlsUrl) {
@@ -382,6 +438,8 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
       _episodeName = null;
       _loading = true;
       _metadataSeekDone = false;
+      _stallSinceMs = null;
+      _stallReloads = 0;
       _durationMs = 0;
       _positionMs = 0;
       _bufferedFraction = 0;
@@ -442,7 +500,58 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
     }
   }
 
-  // ---- ticker ------------------------------------------------------------
+  /// The browser is still waiting on data and the clock has not moved. Fetch
+  /// the stream again and reopen it at the same timestamp.
+  void _watchForStall() {
+    if (_loading || _stallReloadBusy || _a.mode != PlayerMode.stream) {
+      _stallSinceMs = null;
+      return;
+    }
+    if (_video.paused || _video.ended) {
+      _stallSinceMs = null;
+      return;
+    }
+    if (_positionMs > _lastMovingPosMs + 300) {
+      _lastMovingPosMs = _positionMs;
+      _stallSinceMs = null;
+      _stallReloads = 0;
+      return;
+    }
+    // readyState < HAVE_FUTURE_DATA means the next frame is not buffered.
+    if (_video.readyState >= 3) {
+      _stallSinceMs = null;
+      return;
+    }
+    _stallSinceMs ??= _now;
+    if (_now - _stallSinceMs! >= _stallLimitMs) {
+      _stallSinceMs = null;
+      _reloadAfterStall();
+    }
+  }
+
+  Future<void> _reloadAfterStall() async {
+    if (_stallReloadBusy || !mounted || _loading) return;
+    if (_stallReloads >= 3) {
+      setState(() {
+        _errorMsg = 'Playback stalled';
+        _loading = false;
+      });
+      return;
+    }
+    _stallReloads++;
+    _stallReloadBusy = true;
+    _forcedResumeMs = _positionMs;
+    setState(() {
+      _loading = true;
+      _errorMsg = null;
+    });
+    try {
+      await _load();
+    } finally {
+      _stallReloadBusy = false;
+    }
+  }
+
   void _startTicker() {
     _ticker?.cancel();
     _ticks = 0;
@@ -461,6 +570,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
 
       _ticks++;
       if (_ticks % 60 == 0) _saveProgress(); // ~30s
+      _watchForStall();
 
       final action = _computeActionKind();
       final changed = action != _actionKind;
@@ -1172,6 +1282,9 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
     SubtitlePrefStore.revision.removeListener(_onRemoteSubtitle);
     _ticker?.cancel();
     _hideTimer?.cancel();
+    for (final node in _mirrorNodes) {
+      node.dispose();
+    }
     _saveProgress();
     PlayerRuntime.leftAt = _now;
     PlayerRuntime.isOpen = false;
@@ -1226,8 +1339,6 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
             ),
             if (!_iosNative && _cueText != null) _subtitleOverlay(),
             if (_autoSync) _syncStatus(),
-            if (_errorMsg == null && !_loading && _actionKind != null)
-              PointerInterceptor(child: _skipActionOverlay()),
             if (_loading) _loaderOverlay(),
             if (_errorMsg != null) PointerInterceptor(child: _errorOverlay()),
             if (_errorMsg == null && !_loading && _showControls)
@@ -1238,6 +1349,11 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
                   child: _controlsOverlay(),
                 ),
               ),
+            // Above the controls so Skip stays clickable, and only as big as
+            // the button — a full-screen catcher here would eat taps and the
+            // pause button and timeline could never be shown.
+            if (_errorMsg == null && !_loading && _actionKind != null)
+              _skipActionOverlay(),
           ],
         ),
       ),
@@ -1249,6 +1365,22 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
       return KeyEventResult.ignored;
     }
     final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.escape) {
+      // In fullscreen, ESC drops out of fullscreen rather than closing the
+      // player (mirrors native browser behaviour).
+      if (web.document.fullscreenElement != null) {
+        _toggleFullscreen();
+      } else {
+        _exit();
+      }
+      return KeyEventResult.handled;
+    }
+    // A mirror or transport button has focus. Leave Select and the arrows to
+    // it so a remote can move between the controls and activate one.
+    final focused = FocusManager.instance.primaryFocus;
+    if (focused != null && focused != node) {
+      return KeyEventResult.ignored;
+    }
     final isSelect = key == LogicalKeyboardKey.space ||
         key == LogicalKeyboardKey.enter ||
         key == LogicalKeyboardKey.select ||
@@ -1273,16 +1405,6 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
     }
     if (key == LogicalKeyboardKey.keyF) {
       _toggleFullscreen();
-      return KeyEventResult.handled;
-    }
-    if (key == LogicalKeyboardKey.escape) {
-      // In fullscreen, ESC drops out of fullscreen rather than closing the
-      // player (mirrors native browser behaviour).
-      if (web.document.fullscreenElement != null) {
-        _toggleFullscreen();
-      } else {
-        _exit();
-      }
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
@@ -1502,7 +1624,9 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
     return Positioned(
       right: 28,
       bottom: _showControls ? 132 : 48,
-      child: _SkipButton(label: label, icon: icon, onTap: _performAction),
+      child: PointerInterceptor(
+        child: _SkipButton(label: label, icon: icon, onTap: _performAction),
+      ),
     );
   }
 
@@ -1521,23 +1645,38 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
         children: [
           Padding(
             padding: const EdgeInsets.all(12),
-            child: Row(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                IconButton(
-                  onPressed: _exit,
-                  icon: const Icon(Icons.arrow_back, color: Colors.white),
+                Row(
+                  children: [
+                    IconButton(
+                      onPressed: _exit,
+                      icon: const Icon(Icons.arrow_back, color: Colors.white),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        _headerTitle(),
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w600),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    _headerTitle(),
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 18,
-                        fontWeight: FontWeight.w600),
-                    overflow: TextOverflow.ellipsis,
+                if (_mirrors.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 48, top: 2),
+                    child: MirrorBar(
+                      mirrors: _mirrors,
+                      selected: _mirrorIndex,
+                      focusNodes: _mirrorNodes,
+                      onSelect: _selectMirror,
+                    ),
                   ),
-                ),
               ],
             ),
           ),

@@ -52,7 +52,11 @@ class _SrcTvAppState extends State<SrcTvApp> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed) return;
-    if (AuthService.isSignedIn) SyncService.sync();
+    // The web player is an HTML video. Focusing it makes the browser report
+    // "resumed" over and over, and each one was downloading the whole library.
+    // Playback already saves progress on its own, so skip the account sync
+    // until the player is closed.
+    if (!PlayerRuntime.isOpen && AuthService.isSignedIn) SyncService.sync();
     if (!ActivePlayback.isActive() || PlayerRuntime.isOpen) return;
     // Don't re-open a player the user just backed out of (a transient
     // inactive→resumed around the pop would otherwise stack a second player

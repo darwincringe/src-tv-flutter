@@ -62,22 +62,45 @@ class StreamClient {
     String type, {
     int? season,
     int? episode,
+    String? source,
   }) async {
     final params = <String, dynamic>{'tmdb_id': tmdbId, 'type': type};
     if (season != null) params['season'] = season;
     if (episode != null) params['episode'] = episode;
+    if (source != null && source.isNotEmpty) params['source'] = source;
     final resp = await _dio.get('extract', queryParameters: params);
     final data = resp.data;
-    if (data is! Map<String, dynamic>) {
+    if (data is! Map) {
       return const ExtractResponse(success: false, error: 'Bad response');
     }
-    final r = ExtractResponse.fromJson(data);
+    final json = Map<String, dynamic>.from(data);
+    final r = ExtractResponse.fromJson(json);
     // Upgrade our-host URLs to https (external subtitle URLs are left as-is).
     return ExtractResponse(
       success: r.success,
       hlsUrl: r.hlsUrl == null ? null : _upgrade(r.hlsUrl!),
       subtitles: r.subtitles.map(_subtitleUrl).toList(),
       error: r.error,
+      mirrors: _parseMirrors(json['mirrors']),
     );
+  }
+
+  List<StreamMirror> _parseMirrors(Object? raw) {
+    if (raw is! List) return const [];
+    final out = <StreamMirror>[];
+    for (final item in raw) {
+      if (item is! Map) continue;
+      final url = item['hls_url'];
+      final source = item['source'];
+      if (url is! String || url.isEmpty) continue;
+      if (source is! String || source.isEmpty) continue;
+      final quality = item['quality'];
+      out.add(StreamMirror(
+        hlsUrl: _upgrade(url),
+        source: source,
+        quality: quality is String ? quality.trim() : '',
+      ));
+    }
+    return out;
   }
 }

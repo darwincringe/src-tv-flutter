@@ -309,8 +309,15 @@ class MediaRepository {
     int tmdbId, {
     int? season,
     int? episode,
+    String? source,
   }) =>
-      _stream.extract(tmdbId, type, season: season, episode: episode);
+      _stream.extract(
+        tmdbId,
+        type,
+        season: season,
+        episode: episode,
+        source: source,
+      );
 
   // ---- Personalization ---------------------------------------------------
 
