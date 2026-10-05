@@ -133,9 +133,12 @@ StreamMirror? _matchUrl(List<StreamMirror> mirrors, String? url) {
   return null;
 }
 
-/// Button text. The provider name is intentionally not included.
+/// Button text: the provider name plus its quality, e.g. "Catflix 1080p".
 String mirrorButtonLabel(int index, StreamMirror mirror) {
-  final name = 'Source ${index + 1}';
+  final raw = mirror.source.trim();
+  final name = raw.isEmpty
+      ? 'Source ${index + 1}'
+      : '${raw[0].toUpperCase()}${raw.substring(1)}';
   final quality = mirror.quality.trim();
   if (quality.isEmpty) return name;
   return '$name $quality';

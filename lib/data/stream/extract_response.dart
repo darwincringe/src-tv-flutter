@@ -2,9 +2,8 @@ import 'package:json_annotation/json_annotation.dart';
 
 part 'extract_response.g.dart';
 
-/// One playable mirror from `GET /extract`. [source] is stored for the user's
-/// preference and is never shown in the player — the button label is only
-/// "Source N" plus [quality].
+/// One playable mirror from `GET /extract`. [source] is the provider name
+/// shown on the player button, together with [quality].
 class StreamMirror {
   final String hlsUrl;
   final String source;

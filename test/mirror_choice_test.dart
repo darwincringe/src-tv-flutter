@@ -63,18 +63,10 @@ void main() {
     expect(pick.index, 1);
   });
 
-  test('button labels never include the provider name', () {
-    expect(mirrorButtonLabel(0, catflix), 'Source 1 1080p');
-    expect(mirrorButtonLabel(1, superstream), 'Source 2 1080p');
-    expect(mirrorButtonLabel(2, vaplayer), 'Source 3 720p');
-    final joined = [
-      mirrorButtonLabel(0, catflix),
-      mirrorButtonLabel(1, superstream),
-      mirrorButtonLabel(2, vaplayer),
-    ].join(' ').toLowerCase();
-    expect(joined.contains('catflix'), isFalse);
-    expect(joined.contains('superstream'), isFalse);
-    expect(joined.contains('vaplayer'), isFalse);
+  test('button labels show the provider and quality', () {
+    expect(mirrorButtonLabel(0, catflix), 'Catflix 1080p');
+    expect(mirrorButtonLabel(1, superstream), 'Superstream 1080p');
+    expect(mirrorButtonLabel(2, vaplayer), 'Vaplayer 720p');
   });
 
   test('a filtered source response still keeps the full mirror list', () async {
@@ -120,10 +112,8 @@ void main() {
       ),
     );
 
-    expect(find.text('Source 1 1080p'), findsOneWidget);
-    expect(find.text('Source 2 720p'), findsOneWidget);
-    expect(find.textContaining('catflix'), findsNothing);
-    expect(find.textContaining('vaplayer'), findsNothing);
+    expect(find.text('Catflix 1080p'), findsOneWidget);
+    expect(find.text('Vaplayer 720p'), findsOneWidget);
 
     nodes[1].requestFocus();
     await tester.pump();
