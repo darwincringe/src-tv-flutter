@@ -1,12 +1,12 @@
 {
-    "name": "srctv_flutter",
-    "short_name": "srctv_flutter",
+    "name": "SRC TV",
+    "short_name": "SRC TV",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
-    "orientation": "portrait-primary",
+    "background_color": "#161616",
+    "theme_color": "#161616",
+    "description": "Browse movies and series, save what you want to watch, and pick up where you left off.",
+    "orientation": "any",
     "prefer_related_applications": false,
     "icons": [
         {

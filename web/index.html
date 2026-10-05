@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <!--
     If you are serving your web app in a path other than the root, change the
@@ -18,7 +18,28 @@
 
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
-  <meta name="description" content="SRC TV — movies & series streaming.">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SRC TV — Movies &amp; Series</title>
+  <meta name="description" content="SRC TV — browse movies and series, save what you want to watch, and pick up where you left off.">
+  <meta name="application-name" content="SRC TV">
+  <meta name="theme-color" content="#161616">
+  <meta name="robots" content="index,follow">
+  <link rel="canonical" href="https://srctv.space/">
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="SRC TV">
+  <meta property="og:title" content="SRC TV — Movies &amp; Series">
+  <meta property="og:description" content="Browse movies and series, save what you want to watch, and pick up where you left off.">
+  <meta property="og:url" content="https://srctv.space/">
+  <meta property="og:image" content="https://srctv.space/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="SRC TV">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="SRC TV — Movies &amp; Series">
+  <meta name="twitter:description" content="Browse movies and series, save what you want to watch, and pick up where you left off.">
+  <meta name="twitter:image" content="https://srctv.space/og.png">
 
   <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">
@@ -26,11 +47,25 @@
   <meta name="apple-mobile-web-app-title" content="SRC TV">
   <link rel="apple-touch-icon" href="icons/Icon-192.png">
 
-  <!-- Favicon -->
-  <link rel="icon" type="image/png" href="favicon.png"/>
+  <link rel="icon" type="image/png" sizes="64x64" href="favicon.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/Icon-192.png">
+  <link rel="icon" type="image/png" sizes="512x512" href="icons/Icon-512.png">
 
-  <title>SRC TV</title>
   <link rel="manifest" href="manifest.json">
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    "name": "SRC TV",
+    "url": "https://srctv.space/",
+    "description": "Browse movies and series, save what you want to watch, and pick up where you left off."
+  }
+  </script>
+
+  <!-- Before Flutter. CarPlay keyboards (APTV) set input.value on Enter
+       without an input event; Flutter never paints that text otherwise. -->
+  <script src="ime_bridge.js"></script>
 
   <!-- hls.js: HLS playback for the web player (Chrome/Firefox need it; Safari
        plays HLS natively). Bundled locally so there's no runtime CDN/CSP dep. -->
@@ -38,6 +73,10 @@
   <script src="speech_align.js"></script>
 </head>
 <body>
+  <noscript>
+    <h1>SRC TV</h1>
+    <p>Browse movies and series, save what you want to watch, and pick up where you left off.</p>
+  </noscript>
   <!--
     You can customize the "flutter_bootstrap.js" script.
     This is useful to provide a custom configuration to the Flutter loader
