@@ -1,29 +1,35 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/navigation.dart';
 import '../../core/theme.dart';
 import '../../data/models/media_item.dart';
+import '../../data/repository/media_repository.dart';
 import '../../data/store/library_store.dart';
 import '../../data/store/watch_progress.dart';
+import '../widgets/continue_watching_row.dart';
 import '../widgets/poster_card.dart';
 
 /// "My Library" — titles the user saved, most-recently-watched first. Local
 /// only (no account needed); rebuilds when the library or watch progress
 /// changes.
-class LibraryScreen extends StatefulWidget {
+class LibraryScreen extends ConsumerStatefulWidget {
   const LibraryScreen({super.key});
 
   @override
-  State<LibraryScreen> createState() => _LibraryScreenState();
+  ConsumerState<LibraryScreen> createState() => _LibraryScreenState();
 }
 
-class _LibraryScreenState extends State<LibraryScreen> {
+class _LibraryScreenState extends ConsumerState<LibraryScreen> {
+  List<WatchProgress> _continue = [];
+
   @override
   void initState() {
     super.initState();
     LibraryStore.revision.addListener(_onChange);
     // Watching something re-sorts the library (last-watched order).
     WatchProgressStore.revision.addListener(_onChange);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadContinue());
   }
 
   @override
@@ -34,7 +40,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   void _onChange() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    setState(() {});
+    _loadContinue();
+  }
+
+  Future<void> _loadContinue() async {
+    try {
+      final list =
+          await ref.read(mediaRepositoryProvider).continueWatching();
+      if (mounted) setState(() => _continue = list);
+    } catch (_) {}
   }
 
   @override
@@ -61,36 +77,60 @@ class _LibraryScreenState extends State<LibraryScreen> {
             ),
             const SizedBox(height: 16),
             Expanded(
-              child: items.isEmpty
+              child: items.isEmpty && _continue.isEmpty
                   ? _empty()
-                  : GridView.builder(
-                      // Don't clip the focused card's scale-up.
+                  : ListView(
                       clipBehavior: Clip.none,
                       padding: const EdgeInsets.only(bottom: 24, right: 16),
-                      gridDelegate:
-                          const SliverGridDelegateWithMaxCrossAxisExtent(
-                        maxCrossAxisExtent: 132,
-                        childAspectRatio: 2 / 3,
-                        crossAxisSpacing: 14,
-                        mainAxisSpacing: 16,
-                      ),
-                      itemCount: items.length,
-                      itemBuilder: (context, i) {
-                        final it = items[i];
-                        final mi = MediaItem(
-                          id: it.tmdbId,
-                          mediaType: it.type,
-                          title: it.type == 'movie' ? it.title : null,
-                          name: it.type == 'tv' ? it.title : null,
-                          posterPath: it.posterPath,
-                        );
-                        return PosterCard(
-                          item: mi,
-                          autofocus: i == 0,
-                          width: 132,
-                          onTap: () => openDetails(context, it.type, it.tmdbId),
-                        );
-                      },
+                      children: [
+                        if (items.isEmpty)
+                          const Padding(
+                            padding: EdgeInsets.only(bottom: 24),
+                            child: Text(
+                              'Your library is empty. Add movies and series with the + button on their page.',
+                              style: TextStyle(color: AppColors.textSecondary),
+                            ),
+                          )
+                        else
+                          PagedPosterGrid(
+                            itemCount: items.length,
+                            posterPath: (i) => items[i].posterPath,
+                            itemBuilder: (context, i, lead, focusNode) {
+                              final it = items[i];
+                              final mi = MediaItem(
+                                id: it.tmdbId,
+                                mediaType: it.type,
+                                title: it.type == 'movie' ? it.title : null,
+                                name: it.type == 'tv' ? it.title : null,
+                                posterPath: it.posterPath,
+                              );
+                              return FittedBox(
+                                fit: BoxFit.contain,
+                                child: PosterCard(
+                                  item: mi,
+                                  autofocus: lead,
+                                  focusNode: focusNode,
+                                  width: 132,
+                                  ensureVisibleOnFocus: true,
+                                  onTap: () =>
+                                      openDetails(context, it.type, it.tmdbId),
+                                ),
+                              );
+                            },
+                          ),
+                        if (_continue.isNotEmpty) ...[
+                          const SizedBox(height: 20),
+                          ContinueWatchingRow(
+                            title: 'Continue Watching',
+                            items: _continue,
+                            rows: 3,
+                            autofocusFirst: items.isEmpty,
+                            padding: EdgeInsets.zero,
+                            onTap: (p) =>
+                                openDetails(context, p.type, p.tmdbId),
+                          ),
+                        ],
+                      ],
                     ),
             ),
           ],

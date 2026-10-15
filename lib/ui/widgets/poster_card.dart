@@ -18,6 +18,7 @@ class PosterCard extends StatelessWidget {
     this.autofocus = false,
     this.focusNode,
     this.width = 114,
+    this.ensureVisibleOnFocus = false,
   });
 
   final MediaItem item;
@@ -26,6 +27,7 @@ class PosterCard extends StatelessWidget {
   final bool autofocus;
   final FocusNode? focusNode;
   final double width;
+  final bool ensureVisibleOnFocus;
 
   @override
   Widget build(BuildContext context) {
@@ -36,6 +38,7 @@ class PosterCard extends StatelessWidget {
         autofocus: autofocus,
         focusNode: focusNode,
         onFocusChange: onFocusChange,
+        ensureVisibleOnFocus: ensureVisibleOnFocus,
         focusedScale: 1.08,
         borderRadius: BorderRadius.circular(10),
         child: AspectRatio(
