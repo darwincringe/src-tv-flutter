@@ -488,6 +488,10 @@ internal class BetterPlayer(
         exoPlayer?.setVideoSurface(surface)
         setAudioAttributes(exoPlayer, true)
         exoPlayer?.addListener(object : Player.Listener {
+            override fun onAudioSessionIdChanged(audioSessionId: Int) {
+                applySoundMode()
+            }
+
             override fun onPlaybackStateChanged(playbackState: Int) {
                 when (playbackState) {
                     Player.STATE_BUFFERING -> {
@@ -498,6 +502,7 @@ internal class BetterPlayer(
                     }
 
                     Player.STATE_READY -> {
+                        applySoundMode()
                         if (!isInitialized) {
                             isInitialized = true
                             sendInitialized()
@@ -568,6 +573,92 @@ internal class BetterPlayer(
         val bracketedValue = max(0.0, min(1.0, value))
             .toFloat()
         exoPlayer?.volume = bracketedValue
+    }
+
+    // SRCTV: Talking / Action booster on this player's audio session.
+    // "off" | "talking" | "action". Re-applied when ExoPlayer assigns a session.
+    private var soundMode: String = "off"
+    private var soundEqualizer: android.media.audiofx.Equalizer? = null
+    private var soundLoudness: android.media.audiofx.LoudnessEnhancer? = null
+    private var soundSessionId: Int = 0
+
+    fun setSoundMode(mode: String?) {
+        soundMode = when (mode) {
+            "talking", "action" -> mode
+            else -> "off"
+        }
+        applySoundMode()
+    }
+
+    private fun applySoundMode() {
+        if (soundMode == "off") {
+            releaseSoundEffects()
+            return
+        }
+        val session = exoPlayer?.audioSessionId ?: 0
+        if (session == 0) return
+        if (soundSessionId != session || soundEqualizer == null) {
+            releaseSoundEffects()
+            try {
+                soundEqualizer = android.media.audiofx.Equalizer(0, session)
+                soundLoudness = android.media.audiofx.LoudnessEnhancer(session)
+                soundSessionId = session
+            } catch (e: RuntimeException) {
+                Log.w(TAG, "Sound booster unavailable", e)
+                releaseSoundEffects()
+                return
+            }
+        }
+        val eq = soundEqualizer ?: return
+        val loud = soundLoudness ?: return
+        try {
+            val range = eq.bandLevelRange
+            val minMb = range[0].toInt()
+            val maxMb = range[1].toInt()
+            val bands = eq.numberOfBands.toInt()
+            for (i in 0 until bands) {
+                val hz = eq.getCenterFreq(i.toShort()) / 1000
+                val mb = if (soundMode == "talking") talkingBoostMb(hz) else actionBoostMb(hz)
+                eq.setBandLevel(i.toShort(), mb.coerceIn(minMb, maxMb).toShort())
+            }
+            val gainMb = if (soundMode == "talking") 400 else 150
+            loud.setTargetGain(gainMb)
+            eq.enabled = true
+            loud.enabled = true
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Sound booster failed", e)
+            releaseSoundEffects()
+        }
+    }
+
+    /** Millibels. Cut rumble, lift the speech band. */
+    private fun talkingBoostMb(hz: Int): Int = when {
+        hz < 150 -> -400
+        hz < 500 -> -150
+        hz < 5000 -> 500
+        else -> -100
+    }
+
+    /** Millibels. Lift bass and the top end so hits read louder. */
+    private fun actionBoostMb(hz: Int): Int = when {
+        hz < 200 -> 600
+        hz < 800 -> 250
+        hz < 3000 -> 0
+        else -> 350
+    }
+
+    private fun releaseSoundEffects() {
+        try {
+            soundEqualizer?.release()
+        } catch (_: RuntimeException) {
+        }
+        try {
+            soundLoudness?.release()
+        } catch (_: RuntimeException) {
+        }
+        soundEqualizer = null
+        soundLoudness = null
+        soundSessionId = 0
     }
 
     fun setSpeed(value: Double) {
@@ -776,6 +867,7 @@ internal class BetterPlayer(
     }
 
     fun dispose() {
+        releaseSoundEffects()
         disposeMediaSession()
         disposeRemoteNotifications()
         if (isInitialized) {

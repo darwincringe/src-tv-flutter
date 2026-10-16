@@ -26,6 +26,8 @@ import '../../data/stream/mirror_choice.dart';
 import '../../data/sync/sync_service.dart';
 import 'mirror_bar.dart';
 import 'player_args.dart';
+import 'sound_boost.dart';
+import 'sound_pref.dart';
 import 'subtitle_config.dart';
 import 'subtitle_parser.dart';
 import 'subtitle_sync.dart';
@@ -57,13 +59,15 @@ bool get _hlsAvailable => _hlsCtor != null && _Hls.isSupported();
 extension type _AudioCtx._(JSObject _) implements JSObject {
   external factory _AudioCtx();
   external _AudioNode createMediaElementSource(JSObject element);
-  external _AnalyserNode createAnalyser();
+  external _BiquadFilter createBiquadFilter();
+  external _DynamicsCompressor createDynamicsCompressor();
   external _GainNode createGain();
   external _ScriptProcessor createScriptProcessor(
       int bufferSize, int inputs, int outputs);
   external JSObject get destination;
   external double get sampleRate;
   external JSPromise resume();
+  external JSPromise close();
 }
 
 extension type _GainNode._(JSObject _) implements JSObject {
@@ -88,12 +92,22 @@ extension type _AudioNode._(JSObject _) implements JSObject {
   external void connect(JSObject destination);
 }
 
-extension type _AnalyserNode._(JSObject _) implements JSObject {
+extension type _BiquadFilter._(JSObject _) implements JSObject {
   external void connect(JSObject destination);
-  external set fftSize(int value);
-  external set smoothingTimeConstant(double value);
-  external int get frequencyBinCount;
-  external void getByteFrequencyData(JSUint8Array array);
+  external set type(String value);
+  external _AudioParam get frequency;
+  @JS('Q')
+  external _AudioParam get q;
+  external _AudioParam get gain;
+}
+
+extension type _DynamicsCompressor._(JSObject _) implements JSObject {
+  external void connect(JSObject destination);
+  external _AudioParam get threshold;
+  external _AudioParam get knee;
+  external _AudioParam get ratio;
+  external _AudioParam get attack;
+  external _AudioParam get release;
 }
 
 class _EpisodeRef {
@@ -105,8 +119,8 @@ class _EpisodeRef {
 /// Web build of the player (same public name/constructor as the native
 /// PlayerScreen; selected via the conditional export in player_view.dart).
 /// HTML5 <video> + hls.js with the app's own overlay controls: resume/progress
-/// (drives sync), subtitle picker, quality picker, skip recap/intro, next/prev
-/// episode + auto-advance.
+/// (drives sync), subtitle picker, quality picker, sound booster, skip
+/// recap/intro, next/prev episode + auto-advance.
 class PlayerScreen extends ConsumerStatefulWidget {
   const PlayerScreen({super.key, required this.args});
   final PlayerArgs args;
@@ -181,8 +195,16 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   int? _lineVideoMs;
   Completer<void>? _captureDone;
   _AudioCtx? _audioCtx;
-  _AnalyserNode? _analyser;
+  _BiquadFilter? _lowCut;
+  _BiquadFilter? _lowShelf;
+  _BiquadFilter? _presence;
+  _BiquadFilter? _highShelf;
+  _DynamicsCompressor? _compressor;
+  _GainNode? _makeup;
+  bool _audioReady = false;
   bool _audioTapFailed = false;
+  SoundMode _soundMode = SoundMode.off;
+  JSFunction? _gestureKick;
 
   Timer? _ticker;
   Timer? _hideTimer;
@@ -195,6 +217,15 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   void initState() {
     super.initState();
     PlayerRuntime.isOpen = true;
+    _soundMode = SoundPrefStore.mode;
+    // A saved booster can't start until the browser sees a click or key,
+    // because routing the video through Web Audio needs that gesture.
+    // Until then the video plays with its normal sound.
+    if (_soundMode != SoundMode.off) {
+      _gestureKick = ((web.Event _) => _kickSavedSound()).toJS;
+      web.document.addEventListener('pointerdown', _gestureKick!);
+      web.document.addEventListener('keydown', _gestureKick!);
+    }
     SubtitlePrefStore.revision.addListener(_onRemoteSubtitle);
     SyncService.pullSubtitlePrefs();
     _season = _a.season;
@@ -704,6 +735,12 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   Future<void> _setAutoSync(bool on) async {
+    if (on) {
+      // Same audio graph as the sound booster. Start it in this tap, before
+      // any await, so the browser allows it.
+      _ensureAudio();
+      _audioCtx?.resume();
+    }
     _autoSync = on;
     if (!on) {
       _syncToken++;
@@ -719,17 +756,32 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
     if (on && _subIndex >= 0 && _cues.isNotEmpty) _beginAutoSync();
   }
 
-  bool _tapAudio() {
-    if (_analyser != null) return true;
+  bool _tapAudio() => _ensureAudio();
+
+  /// Route the video through an equalizer. Once this runs, the <video>
+  /// element no longer plays audio on its own, so it must only happen from
+  /// a click or key press — otherwise the soundtrack goes silent.
+  bool _ensureAudio() {
+    if (_audioReady) return true;
     if (_audioTapFailed) return false;
     try {
       final ctx = _AudioCtx();
       final source = ctx.createMediaElementSource(_video);
-      final analyser = ctx.createAnalyser()
-        ..fftSize = 2048
-        ..smoothingTimeConstant = 0.35;
-      source.connect(analyser);
-      analyser.connect(ctx.destination);
+      final lowCut = ctx.createBiquadFilter()..type = 'highpass';
+      final lowShelf = ctx.createBiquadFilter()..type = 'lowshelf';
+      final presence = ctx.createBiquadFilter()..type = 'peaking';
+      final highShelf = ctx.createBiquadFilter()..type = 'highshelf';
+      final compressor = ctx.createDynamicsCompressor();
+      final makeup = ctx.createGain();
+      source.connect(lowCut);
+      lowCut.connect(lowShelf);
+      lowShelf.connect(presence);
+      presence.connect(highShelf);
+      highShelf.connect(compressor);
+      compressor.connect(makeup);
+      makeup.connect(ctx.destination);
+      // Subtitle auto-sync listens to the original mix, not the boosted one,
+      // and this branch is muted so it doesn't play twice.
       final processor = ctx.createScriptProcessor(4096, 1, 1);
       final mute = ctx.createGain();
       mute.gain.value = 0;
@@ -738,12 +790,99 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
       processor.connect(mute);
       mute.connect(ctx.destination);
       _audioCtx = ctx;
-      _analyser = analyser;
+      _lowCut = lowCut;
+      _lowShelf = lowShelf;
+      _presence = presence;
+      _highShelf = highShelf;
+      _compressor = compressor;
+      _makeup = makeup;
+      _audioReady = true;
+      _applySoundCurve();
       return true;
     } catch (_) {
       _audioTapFailed = true;
       return false;
     }
+  }
+
+  void _kickSavedSound() {
+    final kick = _gestureKick;
+    if (kick != null) {
+      web.document.removeEventListener('pointerdown', kick);
+      web.document.removeEventListener('keydown', kick);
+      _gestureKick = null;
+    }
+    if (_soundMode == SoundMode.off) return;
+    if (!_ensureAudio()) return;
+    _audioCtx?.resume();
+  }
+
+  void _applySoundCurve() {
+    final curve = SoundCurve.forMode(_soundMode);
+    final lowCut = _lowCut;
+    final lowShelf = _lowShelf;
+    final presence = _presence;
+    final highShelf = _highShelf;
+    final compressor = _compressor;
+    final makeup = _makeup;
+    if (lowCut == null ||
+        lowShelf == null ||
+        presence == null ||
+        highShelf == null ||
+        compressor == null ||
+        makeup == null) {
+      return;
+    }
+    lowCut.frequency.value = curve.highpassHz;
+    lowCut.q.value = 0.7;
+    lowShelf.frequency.value = curve.lowShelfHz;
+    lowShelf.gain.value = curve.lowShelfDb;
+    lowShelf.q.value = 0.7;
+    presence.frequency.value = curve.presenceHz;
+    presence.gain.value = curve.presenceDb;
+    presence.q.value = curve.presenceQ;
+    highShelf.frequency.value = curve.highShelfHz;
+    highShelf.gain.value = curve.highShelfDb;
+    highShelf.q.value = 0.7;
+    compressor.threshold.value = curve.thresholdDb;
+    compressor.knee.value = curve.kneeDb;
+    compressor.ratio.value = curve.ratio;
+    compressor.attack.value = curve.attackSec;
+    compressor.release.value = curve.releaseSec;
+    makeup.gain.value = curve.makeup;
+  }
+
+  void _setSoundMode(SoundMode mode) {
+    _soundMode = mode;
+    SoundPrefStore.save(mode);
+    if (mode != SoundMode.off || _audioReady) {
+      if (!_ensureAudio()) {
+        _snack('This browser can’t boost the sound');
+      } else {
+        _applySoundCurve();
+        _audioCtx?.resume();
+      }
+    }
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _showSoundMenu() async {
+    final wasPlaying = _playing;
+    _hideTimer?.cancel();
+    final modes = SoundMode.values;
+    await showDialog<int>(
+      context: context,
+      barrierColor: Colors.black54,
+      builder: (_) => _PickerMenu(
+        title: 'Sound',
+        labels: [for (final m in modes) m.label],
+        details: [for (final m in modes) m.detail],
+        current: modes.indexOf(_soundMode),
+        // Apply inside the tap so the browser still counts it as a gesture.
+        onSelected: (i) => _setSoundMode(modes[i]),
+      ),
+    );
+    if (wasPlaying) _restartHideTimer();
   }
 
   void _onPcm(JSObject event) {
@@ -1211,6 +1350,14 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   void dispose() {
     _syncToken++;
     _syncNote.dispose();
+    final kick = _gestureKick;
+    if (kick != null) {
+      web.document.removeEventListener('pointerdown', kick);
+      web.document.removeEventListener('keydown', kick);
+    }
+    try {
+      _audioCtx?.close();
+    } catch (_) {}
     SubtitlePrefStore.revision.removeListener(_onRemoteSubtitle);
     _ticker?.cancel();
     _hideTimer?.cancel();
@@ -1666,6 +1813,18 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
                 const SizedBox(width: 10),
                 Text(_fmt(_durationMs),
                     style: const TextStyle(color: Colors.white, fontSize: 13)),
+                IconButton(
+                  onPressed: _showSoundMenu,
+                  tooltip: _soundMode == SoundMode.off
+                      ? 'Sound'
+                      : 'Sound: ${_soundMode.label}',
+                  icon: Icon(
+                    Icons.graphic_eq,
+                    color: _soundMode == SoundMode.off
+                        ? Colors.white70
+                        : Colors.white,
+                  ),
+                ),
                 if (hasQuality) ...[
                   const SizedBox(width: 4),
                   IconButton(
@@ -1952,11 +2111,21 @@ class _SubtitleMenuState extends State<_SubtitleMenu> {
 /// mouse both work; wrapped in a PointerInterceptor because it floats over the
 /// <video> platform view. Pops the chosen 0-based index, or null.
 class _PickerMenu extends StatelessWidget {
-  const _PickerMenu(
-      {required this.title, required this.labels, required this.current});
+  const _PickerMenu({
+    required this.title,
+    required this.labels,
+    required this.current,
+    this.details,
+    this.onSelected,
+  });
   final String title;
   final List<String> labels;
   final int current;
+  final List<String>? details;
+
+  /// Runs in the tap, before the dialog closes, so a browser user-gesture
+  /// (needed to start the sound booster) is still active.
+  final ValueChanged<int>? onSelected;
 
   @override
   Widget build(BuildContext context) {
@@ -2008,9 +2177,15 @@ class _PickerMenu extends StatelessWidget {
                         itemCount: labels.length,
                         itemBuilder: (context, i) => _MenuRow(
                           label: labels[i],
+                          detail: details != null && i < details!.length
+                              ? details![i]
+                              : null,
                           selected: i == current,
                           autofocus: i == current,
-                          onTap: () => Navigator.pop(context, i),
+                          onTap: () {
+                            onSelected?.call(i);
+                            Navigator.pop(context, i);
+                          },
                         ),
                       ),
                     ),
@@ -2026,12 +2201,15 @@ class _PickerMenu extends StatelessWidget {
 }
 
 class _MenuRow extends StatefulWidget {
-  const _MenuRow(
-      {required this.label,
-      required this.selected,
-      required this.onTap,
-      this.autofocus = false});
+  const _MenuRow({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    this.detail,
+    this.autofocus = false,
+  });
   final String label;
+  final String? detail;
   final bool selected;
   final VoidCallback onTap;
   final bool autofocus;
@@ -2064,16 +2242,33 @@ class _MenuRowState extends State<_MenuRow> {
           child: Row(
             children: [
               Expanded(
-                child: Text(
-                  widget.label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: AppColors.textPrimary,
-                    fontSize: 15,
-                    fontWeight:
-                        widget.selected ? FontWeight.bold : FontWeight.normal,
-                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      widget.label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: AppColors.textPrimary,
+                        fontSize: 15,
+                        fontWeight: widget.selected
+                            ? FontWeight.bold
+                            : FontWeight.normal,
+                      ),
+                    ),
+                    if (widget.detail != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          widget.detail!,
+                          style: const TextStyle(
+                            color: AppColors.textSecondary,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
               ),
               if (widget.selected)

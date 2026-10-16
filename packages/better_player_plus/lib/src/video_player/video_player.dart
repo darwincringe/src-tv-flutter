@@ -553,6 +553,12 @@ class VideoPlayerController extends ValueNotifier<VideoPlayerValue> {
     await _applyVolume();
   }
 
+  /// `off`, `talking`, or `action`. Android applies it on the ExoPlayer session.
+  Future<void> setSoundMode(String mode) async {
+    if (_textureId == null) return;
+    await _videoPlayerPlatform.setSoundMode(_textureId, mode);
+  }
+
   /// Sets the speed of [this].
   ///
   /// [speed] indicates a value between 0.0 and 2.0 on a linear scale.

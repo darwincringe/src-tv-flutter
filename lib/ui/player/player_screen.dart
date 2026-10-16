@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:better_player_plus/better_player_plus.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_selector/file_selector.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -25,6 +26,8 @@ import '../../data/tmdb/image_urls.dart';
 import '../../data/youtube/youtube_extractor.dart';
 import 'mirror_bar.dart';
 import 'player_args.dart';
+import 'sound_boost.dart';
+import 'sound_pref.dart';
 import 'subtitle_config.dart';
 import 'subtitle_parser.dart';
 
@@ -54,6 +57,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       '(KHTML, like Gecko) Chrome/120.0 Safari/537.36';
 
   BetterPlayerController? _controller;
+  SoundMode _soundMode = SoundMode.off;
   Timer? _tick;
   Timer? _hideTimer;
   int _ticks = 0;
@@ -135,6 +139,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   final FocusNode _playPauseFocus = FocusNode(debugLabel: 'playpause');
   final FocusNode _seekFocus = FocusNode(debugLabel: 'seek');
   final FocusNode _skipFocus = FocusNode(debugLabel: 'skip');
+  final FocusNode _soundFocus = FocusNode(debugLabel: 'sound');
   // One node per mirror so D-pad focus survives the control overlay rebuilding.
   final List<FocusNode> _mirrorNodes = [];
   List<StreamMirror> _mirrors = const [];
@@ -154,6 +159,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   void initState() {
     super.initState();
     PlayerRuntime.isOpen = true;
+    _soundMode = SoundPrefStore.mode;
     SubtitlePrefStore.revision.addListener(_onRemoteSubtitle);
     SyncService.pullSubtitlePrefs();
     WidgetsBinding.instance.addObserver(this);
@@ -236,6 +242,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           }
         }
         _startTick();
+        _applySoundMode();
         break;
       case BetterPlayerEventType.play:
         _playing = true;
@@ -655,6 +662,43 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     );
   }
 
+  // ---- Sound -------------------------------------------------------------
+
+  Future<void> _applySoundMode() async {
+    if (defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      await _controller?.setSoundMode(_soundMode.name);
+    } catch (_) {}
+  }
+
+  void _setSoundMode(SoundMode mode) {
+    _soundMode = mode;
+    SoundPrefStore.save(mode);
+    _applySoundMode();
+    if (mounted) setState(() {});
+  }
+
+  void _showSoundDialog() {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        backgroundColor: AppColors.charcoalLight,
+        title: const Text('Sound',
+            style: TextStyle(color: AppColors.textPrimary)),
+        children: [
+          for (final mode in SoundMode.values)
+            _dialogOption(
+              ctx,
+              mode.label,
+              _soundMode == mode,
+              () => _setSoundMode(mode),
+              detail: mode.detail,
+            ),
+        ],
+      ),
+    );
+  }
+
   // ---- Quality -----------------------------------------------------------
 
   void _showQualityDialog() {
@@ -698,10 +742,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     BuildContext ctx,
     String label,
     bool selected,
-    VoidCallback onTap,
-  ) {
+    VoidCallback onTap, {
+    String? detail,
+  }) {
     return _DialogOption(
       label: label,
+      detail: detail,
       selected: selected,
       autofocus: selected, // land D-pad focus on the current choice
       onTap: () {
@@ -1229,6 +1275,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _playPauseFocus.dispose();
     _seekFocus.dispose();
     _skipFocus.dispose();
+    _soundFocus.dispose();
     for (final node in _mirrorNodes) {
       node.dispose();
     }
@@ -1692,6 +1739,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   const SizedBox(width: 12),
                   Text(_fmt(_duration),
                       style: const TextStyle(color: Colors.white)),
+                  if (defaultTargetPlatform == TargetPlatform.android) ...[
+                    const SizedBox(width: 6),
+                    _FocusIconButton(
+                      focusNode: _soundFocus,
+                      icon: Icons.graphic_eq,
+                      active: _soundMode != SoundMode.off,
+                      onTap: _showSoundDialog,
+                    ),
+                  ],
                   if (isStream) ...[
                     _FocusIconButton(
                       icon: Icons.closed_caption,
@@ -1855,6 +1911,7 @@ class _FocusIconButton extends StatefulWidget {
     this.spinOnTap = 0.0,
     this.label,
     this.flipHorizontally = false,
+    this.active = false,
   });
   final IconData icon;
   final VoidCallback onTap;
@@ -1874,6 +1931,10 @@ class _FocusIconButton extends StatefulWidget {
   /// Mirror the icon horizontally — turns the counter-clockwise `Icons.replay`
   /// arrow into a clockwise "forward" arrow for the +15s button.
   final bool flipHorizontally;
+
+  /// Draws a ring even when focus is elsewhere, so a chosen sound mode stays
+  /// visible on a TV.
+  final bool active;
 
   @override
   State<_FocusIconButton> createState() => _FocusIconButtonState();
@@ -1983,7 +2044,9 @@ class _FocusIconButtonState extends State<_FocusIconButton>
                 color: Colors.transparent,
                 border: _focused
                     ? Border.all(color: Colors.white, width: 2.5)
-                    : null,
+                    : widget.active
+                        ? Border.all(color: Colors.white70, width: 1.5)
+                        : null,
               ),
               child: icon,
             ),
@@ -2061,9 +2124,11 @@ class _DialogOption extends StatefulWidget {
     required this.label,
     required this.selected,
     required this.onTap,
+    this.detail,
     this.autofocus = false,
   });
   final String label;
+  final String? detail;
   final bool selected;
   final VoidCallback onTap;
   final bool autofocus;
@@ -2111,7 +2176,25 @@ class _DialogOptionState extends State<_DialogOption> {
                 size: 18,
               ),
               const SizedBox(width: 12),
-              Text(widget.label, style: TextStyle(color: fg)),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(widget.label, style: TextStyle(color: fg)),
+                  if (widget.detail != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        widget.detail!,
+                        style: TextStyle(
+                          color: _focused
+                              ? Colors.black87
+                              : AppColors.textSecondary,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
             ],
           ),
         ),

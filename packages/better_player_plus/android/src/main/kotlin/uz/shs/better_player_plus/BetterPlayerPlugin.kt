@@ -180,6 +180,11 @@ class BetterPlayerPlugin : FlutterPlugin, ActivityAware, MethodCallHandler {
                 result.success(null)
             }
 
+            SET_SOUND_MODE_METHOD -> {
+                player.setSoundMode(call.argument(MODE_PARAMETER))
+                result.success(null)
+            }
+
             PLAY_METHOD -> {
                 setupNotification(player)
                 player.play()
@@ -585,6 +590,8 @@ class BetterPlayerPlugin : FlutterPlugin, ActivityAware, MethodCallHandler {
         private const val SET_DATA_SOURCE_METHOD = "setDataSource"
         private const val SET_LOOPING_METHOD = "setLooping"
         private const val SET_VOLUME_METHOD = "setVolume"
+        private const val SET_SOUND_MODE_METHOD = "setSoundMode"
+        private const val MODE_PARAMETER = "mode"
         private const val PLAY_METHOD = "play"
         private const val PAUSE_METHOD = "pause"
         private const val SEEK_TO_METHOD = "seekTo"

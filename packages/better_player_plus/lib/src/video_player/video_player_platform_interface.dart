@@ -109,6 +109,9 @@ abstract class VideoPlayerPlatform {
     throw UnimplementedError('setVolume() has not been implemented.');
   }
 
+  /// `off`, `talking`, or `action`. No-op on platforms without a booster.
+  Future<void> setSoundMode(int? textureId, String mode) async {}
+
   /// Sets the video speed to a range between 0.0 and 2.0
   Future<void> setSpeed(int? textureId, double speed) {
     throw UnimplementedError('setSpeed() has not been implemented.');

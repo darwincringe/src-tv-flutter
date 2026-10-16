@@ -12,6 +12,7 @@ import 'data/store/recommendation_seeds.dart';
 import 'data/store/subtitle_pref.dart';
 import 'data/store/watch_progress.dart';
 import 'data/sync/sync_service.dart';
+import 'ui/player/sound_pref.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -29,6 +30,7 @@ Future<void> main() async {
   await RecommendationSeeds.init();
   await SubtitlePrefStore.init();
   await MirrorPrefStore.init();
+  await SoundPrefStore.init();
   await AuthService.init();
   // Wire the local stores to the account (no-op while signed out).
   SyncService.init();

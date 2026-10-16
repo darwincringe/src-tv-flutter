@@ -124,6 +124,10 @@ class MethodChannelVideoPlayer extends VideoPlayerPlatform {
       _channel.invokeMethod<void>('setVolume', <String, dynamic>{'textureId': textureId, 'volume': volume});
 
   @override
+  Future<void> setSoundMode(int? textureId, String mode) =>
+      _channel.invokeMethod<void>('setSoundMode', <String, dynamic>{'textureId': textureId, 'mode': mode});
+
+  @override
   Future<void> setSpeed(int? textureId, double speed) =>
       _channel.invokeMethod<void>('setSpeed', <String, dynamic>{'textureId': textureId, 'speed': speed});
 
