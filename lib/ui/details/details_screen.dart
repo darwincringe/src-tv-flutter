@@ -31,6 +31,7 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
     with WidgetsBindingObserver {
   MediaDetails? _details;
   List<MediaItem> _similar = [];
+  List<String> _gallery = [];
   Object? _error;
 
   int _selectedSeason = 1;
@@ -97,16 +98,37 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
     if (state == AppLifecycleState.resumed) _refreshProgress();
   }
 
+  @override
+  void didUpdateWidget(DetailsScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.id != widget.id || oldWidget.mediaType != widget.mediaType) {
+      _details = null;
+      _similar = [];
+      _gallery = [];
+      _episodes = [];
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _load();
+      });
+    }
+  }
+
   Future<void> _load() async {
     setState(() => _error = null);
     try {
       final repo = ref.read(mediaRepositoryProvider);
       final d = await repo.details(widget.mediaType, widget.id);
       final sim = (await repo.similar(widget.mediaType, widget.id)).take(12).toList();
+      List<String> gallery = const [];
+      try {
+        gallery = await repo.gallery(widget.mediaType, widget.id);
+      } catch (_) {
+        gallery = const [];
+      }
       if (!mounted) return;
       setState(() {
         _details = d;
         _similar = sim;
+        _gallery = gallery;
         _progress = WatchProgressStore.get(_progressType, widget.id);
         if (d.isTv && d.seasons.isNotEmpty) {
           _selectedSeason = d.seasons.first.seasonNumber;
@@ -205,7 +227,7 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
           PlayerRuntime.backGuardUntil = 0; // consume the guard once
           return; // swallow the stray back from the trailer exit
         }
-        navBack(context);
+        backFromDetails(context);
       },
       child: _buildBody(context),
     );
@@ -241,6 +263,7 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
                 _header(d, portrait),
                 if (d.cast.isNotEmpty) _castSection(d),
                 if (d.isTv && d.seasons.isNotEmpty) _seasonsSection(d),
+                if (_gallery.isNotEmpty) _gallerySection(),
                 if (_similar.isNotEmpty) _moreLikeThis(portrait),
               ],
             ),
@@ -249,7 +272,7 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
             top: 8,
             left: 8,
             child: SafeArea(
-              child: _FocusBackButton(onTap: () => navBack(context)),
+              child: _FocusBackButton(onTap: () => backFromDetails(context)),
             ),
           ),
         ],
@@ -498,6 +521,41 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
                 onTap: _showMoreEpisodes,
               ),
           ],
+        ],
+      ),
+    );
+  }
+
+  // ---- Gallery -----------------------------------------------------------
+
+  Widget _gallerySection() {
+    return Padding(
+      padding: const EdgeInsets.only(top: 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(left: 40, bottom: 10),
+            child: Text(
+              'Gallery',
+              style: TextStyle(
+                color: AppColors.textPrimary,
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+          SizedBox(
+            height: 196,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              clipBehavior: Clip.none,
+              padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 6),
+              itemCount: _gallery.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 12),
+              itemBuilder: (context, i) => _GalleryCard(path: _gallery[i]),
+            ),
+          ),
         ],
       ),
     );
@@ -945,6 +1003,36 @@ class _EpisodeRow extends StatelessWidget {
   }
 }
 
+class _GalleryCard extends StatelessWidget {
+  const _GalleryCard({required this.path});
+  final String path;
+
+  @override
+  Widget build(BuildContext context) {
+    final url = posterUrl(path);
+    return FocusableCard(
+      focusedScale: 1.04,
+      ensureVisibleOnFocus: true,
+      borderRadius: BorderRadius.circular(6),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(4),
+        child: SizedBox(
+          width: 120,
+          height: 180,
+          child: url != null
+              ? CachedNetworkImage(
+                  imageUrl: url,
+                  fit: BoxFit.cover,
+                  memCacheWidth:
+                      (120 * MediaQuery.devicePixelRatioOf(context)).round(),
+                )
+              : Container(color: AppColors.charcoalLight),
+        ),
+      ),
+    );
+  }
+}
+
 class _SimilarCard extends StatelessWidget {
   const _SimilarCard({required this.item, required this.onTap});
   final MediaItem item;
@@ -953,7 +1041,7 @@ class _SimilarCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final url = cardBackdropUrl(item.backdropPath);
-    final date = item.releaseDate ?? item.firstAirDate ?? '';
+    final year = item.year ?? '';
     return FocusableCard(
       onTap: onTap,
       focusedScale: 1.04,
@@ -994,7 +1082,9 @@ class _SimilarCard extends StatelessWidget {
                     ),
                   ),
                   Text(
-                    '★ ${(item.voteAverage ?? 0).toStringAsFixed(1)}   $date',
+                    year.isEmpty
+                        ? '★ ${(item.voteAverage ?? 0).toStringAsFixed(1)}'
+                        : '★ ${(item.voteAverage ?? 0).toStringAsFixed(1)}   $year',
                     style: const TextStyle(
                       color: AppColors.textSecondary,
                       fontSize: 12,

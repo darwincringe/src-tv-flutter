@@ -1,17 +1,13 @@
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import '../../core/theme.dart';
 import '../../data/models/media_details.dart';
 import '../../data/models/media_item.dart';
+import 'continue_watching_row.dart';
 import 'poster_card.dart';
 
-/// On the web build, mouse drag-scrolling of long rows is unreliable, so cap
-/// every row at this many cards (all reachable by wheel scroll).
-const int _webRowCap = 20;
-
-/// A titled horizontal row of poster cards. Mirrors the Kotlin
-/// `CategoryRowSection`.
+/// A titled row of poster cards. See more keeps the row one line tall and
+/// slides five titles at a time.
 class CategoryRowSection extends StatefulWidget {
   const CategoryRowSection({
     super.key,
@@ -71,30 +67,31 @@ class _CategoryRowSectionState extends State<CategoryRowSection> {
             ),
           ),
         ),
-        SizedBox(
-          height: 196,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            // Don't clip the focus scale-up of the poster cards.
-            clipBehavior: Clip.none,
-            padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 6),
-            itemCount: kIsWeb && widget.row.items.length > _webRowCap
-                ? _webRowCap
-                : widget.row.items.length,
-            separatorBuilder: (_, _) => const SizedBox(width: 14),
-            itemBuilder: (context, index) {
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 40),
+          child: PagedPosterGrid(
+            rows: 1,
+            itemCount: widget.row.items.length,
+            firstItemFocusNode: widget.firstItemFocusNode,
+            posterPath: (i) => widget.row.items[i].posterPath,
+            itemBuilder: (context, index, lead, focusNode) {
               final item = widget.row.items[index];
-              return PosterCard(
-                item: item,
-                autofocus: index == 0 && widget.autofocusFirst,
-                focusNode: index == 0 ? widget.firstItemFocusNode : null,
-                onFocusChange: (f) {
-                  if (f) {
-                    widget.onItemFocus?.call(item);
-                    _ensureSectionVisible();
-                  }
-                },
-                onTap: () => widget.onItemTap(item),
+              return FittedBox(
+                fit: BoxFit.contain,
+                child: PosterCard(
+                  item: item,
+                  width: 132,
+                  autofocus: lead && widget.autofocusFirst,
+                  focusNode: focusNode,
+                  ensureVisibleOnFocus: true,
+                  onFocusChange: (f) {
+                    if (f) {
+                      widget.onItemFocus?.call(item);
+                      _ensureSectionVisible();
+                    }
+                  },
+                  onTap: () => widget.onItemTap(item),
+                ),
               );
             },
           ),

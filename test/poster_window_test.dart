@@ -115,7 +115,7 @@ void main() {
     await tester.tap(find.text('See more'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 120));
-    // The outgoing cards are still on screen while they slide away.
+    // Posters that are leaving are still in the tree while they slide out.
     expect(find.text('title-0'), findsOneWidget);
 
     await tester.pumpAndSettle();
@@ -135,4 +135,47 @@ void main() {
     expect(find.text('title-5'), findsNothing);
     expect(find.text('See more'), findsOneWidget);
   });
+
+  testWidgets('a poster that stays slides into its new cell', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1400, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    // One row of eight cells. Titles 5 and 6 are in both windows.
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 1100,
+            child: PagedPosterGrid(
+              itemCount: 20,
+              rows: 1,
+              posterPath: _emptyPoster,
+              itemBuilder: _title,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final before = tester.getTopLeft(find.text('title-5'));
+    await tester.tap(find.text('See more'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 160));
+
+    final during = tester.getTopLeft(find.text('title-5'));
+    expect(during.dx, lessThan(before.dx));
+    expect(during.dx, greaterThan(0));
+    expect(find.text('title-0'), findsOneWidget);
+
+    await tester.pumpAndSettle();
+    final after = tester.getTopLeft(find.text('title-5'));
+    expect(after.dx, lessThan(before.dx));
+    expect(after.dx, greaterThan(0));
+  });
+}
+
+String? _emptyPoster(int index) => null;
+
+Widget _title(BuildContext context, int index, bool lead, FocusNode? focusNode) {
+  return Text('title-$index', key: ValueKey('title-$index'));
 }

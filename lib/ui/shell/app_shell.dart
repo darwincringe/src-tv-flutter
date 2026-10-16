@@ -2,13 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/shell_return.dart';
 import '../../core/theme.dart';
 
 /// Navigation items, top-to-bottom / left-to-right. Order must match the router
-/// branch order in `router.dart`: Search, Home, Movies, TV Series, Library,
-/// Settings.
+/// branch order in `router.dart`: Search, Helper, Home, Movies, TV Series,
+/// Library, Settings.
 const _navItems = <_NavSpec>[
   _NavSpec(Icons.search, 'Search'),
+  _NavSpec(Icons.auto_awesome_outlined, 'Helper'),
   _NavSpec(Icons.home_filled, 'Home'),
   _NavSpec(Icons.movie_outlined, 'Movies'),
   _NavSpec(Icons.live_tv_outlined, 'TV Series'),
@@ -38,8 +40,8 @@ class AppShell extends StatefulWidget {
 }
 
 class _AppShellState extends State<AppShell> {
-  // Index of the Home branch in _navItems (Search, Home, Movies, TV, Settings).
-  static const int _homeIndex = 1;
+  // Index of the Home branch. Search and Helper sit above it.
+  static const int _homeIndex = 2;
 
   late final List<FocusNode> _railNodes = List.generate(
     _navItems.length,
@@ -109,6 +111,7 @@ class _AppShellState extends State<AppShell> {
 
   @override
   Widget build(BuildContext context) {
+    ShellReturn.onShell(GoRouterState.of(context).uri.path);
     final portrait = MediaQuery.of(context).orientation == Orientation.portrait;
     final current = widget.navigationShell.currentIndex;
 
@@ -140,7 +143,7 @@ class _AppShellState extends State<AppShell> {
                   child: Container(
                     height: 60,
                     color: AppColors.railBlack,
-                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: buttons,
@@ -160,15 +163,19 @@ class _AppShellState extends State<AppShell> {
                   child: Container(
                     width: 60,
                     color: AppColors.railBlack,
-                    padding: const EdgeInsets.symmetric(vertical: 24),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        for (final b in buttons) ...[
-                          b,
-                          const SizedBox(height: 12),
+                    alignment: Alignment.center,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          for (final b in buttons) ...[
+                            b,
+                            const SizedBox(height: 12),
+                          ],
                         ],
-                      ],
+                      ),
                     ),
                   ),
                 ),

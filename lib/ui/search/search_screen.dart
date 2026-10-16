@@ -15,6 +15,22 @@ import '../widgets/coming_soon_badge.dart';
 
 enum _Status { idle, loading, empty, error, results }
 
+/// Survives leaving Search for a title, so Back can show the same query.
+class SearchMemory {
+  static String query = '';
+  static List<MediaItem> results = const [];
+
+  static void save(String query, List<MediaItem> results) {
+    SearchMemory.query = query.trim();
+    SearchMemory.results = List.of(results);
+  }
+
+  static void clear() {
+    query = '';
+    results = const [];
+  }
+}
+
 class SearchScreen extends ConsumerStatefulWidget {
   const SearchScreen({super.key});
 
@@ -33,8 +49,14 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
   @override
   void initState() {
     super.initState();
+    if (SearchMemory.query.isNotEmpty) {
+      _controller.text = SearchMemory.query;
+      _lastQuery = SearchMemory.query;
+      _results = List.of(SearchMemory.results);
+      _status = _results.isEmpty ? _Status.empty : _Status.results;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _fieldFocus.requestFocus();
+      if (mounted) _fieldFocus.requestFocus();
     });
   }
 
@@ -49,7 +71,12 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
   void _onChanged(String q) {
     _debounce?.cancel();
     if (q.trim().isEmpty) {
-      setState(() => _status = _Status.idle);
+      SearchMemory.clear();
+      setState(() {
+        _status = _Status.idle;
+        _results = [];
+        _lastQuery = '';
+      });
       return;
     }
     _debounce = Timer(const Duration(milliseconds: 400), () => _search(q));
@@ -67,6 +94,7 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
         _results = results;
         _status = results.isEmpty ? _Status.empty : _Status.results;
       });
+      SearchMemory.save(q, results);
     } catch (_) {
       if (!mounted) return;
       setState(() => _status = _Status.error);

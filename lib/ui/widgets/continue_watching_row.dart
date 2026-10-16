@@ -131,20 +131,27 @@ class PagedPosterGrid extends StatefulWidget {
   State<PagedPosterGrid> createState() => _PagedPosterGridState();
 }
 
+class _Slot {
+  const _Slot({required this.id, required this.rect, required this.child});
+
+  final String id;
+  final Rect rect;
+  final Widget child;
+}
+
 class _PagedPosterGridState extends State<PagedPosterGrid>
     with SingleTickerProviderStateMixin {
   static const double _extent = 132;
   static const double _gap = 14;
-  static const Duration _slideDuration = Duration(milliseconds: 460);
+  static const double _rowGap = 16;
+  static const Duration _slideDuration = Duration(milliseconds: 380);
 
   int _start = 0;
   int? _pendingStart;
   bool _animating = false;
-  Widget? _cachedStrip;
-  int? _cachedStart;
-  bool _swapped = false;
   bool _forward = true;
   FocusNode? _pendingFocus;
+  final Map<String, Widget> _flying = {};
   late final AnimationController _slide;
   final FocusNode _beginFocus = FocusNode(debugLabel: 'see-more-begin');
   final FocusNode _endFocus = FocusNode(debugLabel: 'see-more-end');
@@ -154,48 +161,15 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
   void initState() {
     super.initState();
     _slide = AnimationController(vsync: this, duration: _slideDuration);
-    _slide.addListener(_onSlideTick);
   }
 
   @override
   void dispose() {
-    _slide.removeListener(_onSlideTick);
     _slide.dispose();
     _beginFocus.dispose();
     _endFocus.dispose();
     _leadFocus.dispose();
     super.dispose();
-  }
-
-  /// Halfway through, the outgoing cards are off-screen. The build swaps to
-  /// the next window on that same frame so it slides in from the other side.
-  void _onSlideTick() {
-    if (_swapped || _pendingStart == null || _slide.value < 0.5) return;
-    _swapped = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      final node = _pendingFocus;
-      _pendingFocus = null;
-      if (node != null && node.canRequestFocus) node.requestFocus();
-    });
-  }
-
-  int get _visibleStart {
-    if (_animating && _pendingStart != null && _slide.value >= 0.5) {
-      return _pendingStart!;
-    }
-    return _start;
-  }
-
-  double _shift(double width) {
-    if (!_animating) return 0;
-    final t = _slide.value.clamp(0.0, 1.0);
-    if (t < 0.5) {
-      final u = Curves.easeIn.transform(t / 0.5);
-      return (_forward ? -u : u) * width;
-    }
-    final u = Curves.easeOut.transform(((t - 0.5) / 0.5).clamp(0.0, 1.0));
-    return (_forward ? (1 - u) : -(1 - u)) * width;
   }
 
   FocusNode get _leadNode => widget.firstItemFocusNode ?? _leadFocus;
@@ -227,18 +201,11 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
         : !forward && !nextPage.canBack
             ? _leadNode
             : (forward ? _endFocus : _beginFocus);
-    _swapped = false;
-    _cachedStrip = null;
-    _cachedStart = null;
+    _flying.clear();
     if (MediaQuery.disableAnimationsOf(context)) {
       setState(() => _start = next);
       _pendingStart = null;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        final node = _pendingFocus;
-        _pendingFocus = null;
-        if (node != null && node.canRequestFocus) node.requestFocus();
-      });
+      _restoreFocus();
       return;
     }
     setState(() => _animating = true);
@@ -247,10 +214,21 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
       setState(() {
         if (_pendingStart != null) _start = _pendingStart!;
         _pendingStart = null;
-        _swapped = false;
         _animating = false;
+        _flying.clear();
       });
       _slide.value = 0;
+      _restoreFocus();
+    });
+  }
+
+  void _restoreFocus() {
+    final node = _pendingFocus;
+    _pendingFocus = null;
+    if (node == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (node.canRequestFocus) node.requestFocus();
     });
   }
 
@@ -259,69 +237,213 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
     return LayoutBuilder(
       builder: (context, constraints) {
         final width = constraints.maxWidth;
+        if (width <= 0) return const SizedBox.shrink();
         final cols = math.max(1, (width / (_extent + _gap)).ceil());
         final capacity = cols * widget.rows;
         final total = widget.itemCount;
-        return ClipRect(
-          child: AnimatedBuilder(
-            animation: _slide,
-            builder: (context, _) => Transform.translate(
-              offset: Offset(_shift(width), 0),
-              child: _cachedPage(width, cols, capacity, total),
-            ),
-          ),
+        return AnimatedBuilder(
+          animation: _slide,
+          builder: (context, _) {
+            final placed = _placed(width, cols, capacity, total);
+            if (placed.isEmpty) return const SizedBox.shrink();
+            final height = placed
+                .map((slot) => slot.rect.bottom)
+                .reduce(math.max);
+            return SizedBox(
+              width: width,
+              height: height + (widget.rows > 1 ? 6 : 0),
+              child: Stack(
+                clipBehavior: _animating ? Clip.hardEdge : Clip.none,
+                children: [
+                  for (final slot in placed)
+                    Positioned.fromRect(
+                      rect: slot.rect,
+                      child: slot.child,
+                    ),
+                ],
+              ),
+            );
+          },
         );
       },
     );
   }
 
-  Widget _cachedPage(double width, int cols, int capacity, int total) {
-    if (!_animating) {
-      _cachedStrip = null;
-      _cachedStart = null;
-      return _strip(width, cols, capacity, total, _start);
-    }
-    final start = _visibleStart;
-    if (_cachedStrip == null || _cachedStart != start) {
-      _cachedStart = start;
-      _cachedStrip = _strip(width, cols, capacity, total, start);
-    }
-    return _cachedStrip!;
+  List<_Slot> _placed(double width, int cols, int capacity, int total) {
+    final current = _slotsFor(_start, width, cols, capacity, total);
+    final nextStart = _animating ? _pendingStart : null;
+    if (nextStart == null) return current;
+    final incoming = _slotsFor(nextStart, width, cols, capacity, total);
+    return _slideSlots(current, incoming, width);
   }
 
-  Widget _strip(double width, int cols, int capacity, int total, int start) {
-    final page = posterWindow(start: start, total: total, capacity: capacity);
-    final tiles = <Widget>[];
-    if (page.canBack) {
-      tiles.add(_seeMore(page.previousIndex, total, capacity, back: true));
+  /// Cards that stay move from their old cell to the new one. Cards that
+  /// leave or arrive travel only far enough to clear the row.
+  List<_Slot> _slideSlots(List<_Slot> from, List<_Slot> to, double width) {
+    final t = Curves.easeOutCubic.transform(_slide.value.clamp(0.0, 1.0));
+    final oldRect = {for (final slot in from) slot.id: slot.rect};
+    final newRect = {for (final slot in to) slot.id: slot.rect};
+    final oldChild = {for (final slot in from) slot.id: slot.child};
+    final newChild = {for (final slot in to) slot.id: slot.child};
+
+    Offset primary = Offset(-_strideOf(from) * widget.step, 0);
+    if (!_forward) primary = Offset(_strideOf(from) * widget.step, 0);
+    for (final slot in to) {
+      if (!slot.id.startsWith('p') || !oldRect.containsKey(slot.id)) continue;
+      final delta = slot.rect.topLeft - oldRect[slot.id]!.topLeft;
+      if ((slot.rect.top - oldRect[slot.id]!.top).abs() < 1) {
+        primary = delta;
+        break;
+      }
     }
-    for (var i = 0; i < page.shown; i++) {
-      final index = page.start + i;
-      final lead = i == 0 && page.start == 0;
-      tiles.add(widget.itemBuilder(
-        context,
-        index,
-        lead,
-        lead ? _leadNode : null,
+
+    final ids = <String>{...oldRect.keys, ...newRect.keys};
+    final leaving = ids.where((id) => !newRect.containsKey(id)).toList();
+    final arriving = ids.where((id) => !oldRect.containsKey(id)).toList();
+    final moved = <_Slot>[];
+
+    Rect slideOff(Rect rect, int order) {
+      final stride = rect.width + _gap;
+      if (_forward) {
+        final left = math.min(
+          rect.shift(primary).left,
+          -rect.width - _gap - order * stride,
+        );
+        return Rect.fromLTWH(left, rect.top, rect.width, rect.height);
+      }
+      final left = math.max(
+        rect.shift(primary).left,
+        width + _gap + order * stride,
+      );
+      return Rect.fromLTWH(left, rect.top, rect.width, rect.height);
+    }
+
+    for (final id in ids) {
+      final child = _flying.putIfAbsent(
+        id,
+        () => newChild[id] ?? oldChild[id]!,
+      );
+      final Rect begin;
+      final Rect end;
+      if (id == 'back' || id == 'forward') {
+        // The end cards stay put when both pages have them. A card that
+        // appears or disappears only travels one poster width, at its edge.
+        final edge = id == 'back' ? -1.0 : 1.0;
+        if (oldRect.containsKey(id) && newRect.containsKey(id)) {
+          begin = oldRect[id]!;
+          end = newRect[id]!;
+        } else if (oldRect.containsKey(id)) {
+          begin = oldRect[id]!;
+          end = begin.shift(Offset(edge * (begin.width + _gap), 0));
+        } else {
+          end = newRect[id]!;
+          begin = end.shift(Offset(edge * (end.width + _gap), 0));
+        }
+      } else if (oldRect.containsKey(id) && newRect.containsKey(id)) {
+        begin = oldRect[id]!;
+        end = newRect[id]!;
+      } else if (oldRect.containsKey(id)) {
+        begin = oldRect[id]!;
+        end = slideOff(begin, leaving.indexOf(id));
+      } else {
+        end = newRect[id]!;
+        final stride = end.width + _gap;
+        final natural = end.shift(Offset(-primary.dx, -primary.dy));
+        final inside = _forward
+            ? natural.left < width
+            : natural.right > 0;
+        if (!inside) {
+          begin = natural;
+        } else if (_forward) {
+          final order = arriving.indexOf(id);
+          begin = Rect.fromLTWH(
+            width + _gap + order * stride,
+            end.top,
+            end.width,
+            end.height,
+          );
+        } else {
+          final order = arriving.indexOf(id);
+          begin = Rect.fromLTWH(
+            -end.width - _gap - order * stride,
+            end.top,
+            end.width,
+            end.height,
+          );
+        }
+      }
+      moved.add(_Slot(
+        id: id,
+        rect: Rect.lerp(begin, end, t)!,
+        child: child,
       ));
     }
-    if (page.canForward) {
-      tiles.add(_seeMore(page.nextIndex, total, capacity, back: false));
+    moved.sort((a, b) => a.rect.left.compareTo(b.rect.left));
+    return moved;
+  }
+
+  double _strideOf(List<_Slot> slots) {
+    if (slots.isEmpty) return _extent + _gap;
+    return slots.first.rect.width + _gap;
+  }
+
+  List<_Slot> _slotsFor(
+    int start,
+    double width,
+    int cols,
+    int capacity,
+    int total,
+  ) {
+    final page = posterWindow(start: start, total: total, capacity: capacity);
+    final ids = <String>[];
+    if (page.canBack) ids.add('back');
+    for (var i = 0; i < page.shown; i++) {
+      ids.add('p${page.start + i}');
     }
-    if (widget.rows <= 1) return _oneRow(width, cols, tiles);
-    return GridView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      clipBehavior: Clip.none,
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-        maxCrossAxisExtent: _extent,
-        childAspectRatio: 2 / 3,
-        crossAxisSpacing: _gap,
-        mainAxisSpacing: 16,
-      ),
-      itemCount: tiles.length,
-      itemBuilder: (context, i) => tiles[i],
+    if (page.canForward) ids.add('forward');
+    if (ids.isEmpty) return const [];
+
+    final fit = widget.rows <= 1 ? math.max(cols, ids.length) : cols;
+    final cardWidth = math.max(0.0, width - _gap * (fit - 1)) / fit;
+    final cardHeight = cardWidth * 3 / 2;
+    final topPad = widget.rows > 1 ? 6.0 : 0.0;
+    final layoutCols = widget.rows <= 1 ? fit : cols;
+
+    Rect at(int slot) {
+      final col = widget.rows <= 1 ? slot : slot % layoutCols;
+      final row = widget.rows <= 1 ? 0 : slot ~/ layoutCols;
+      return Rect.fromLTWH(
+        col * (cardWidth + _gap),
+        topPad + row * (cardHeight + _rowGap),
+        cardWidth,
+        cardHeight,
+      );
+    }
+
+    return [
+      for (var i = 0; i < ids.length; i++)
+        _Slot(
+          id: ids[i],
+          rect: at(i),
+          child: _childForId(ids[i], page, total, capacity),
+        ),
+    ];
+  }
+
+  Widget _childForId(String id, PosterWindow page, int total, int capacity) {
+    if (id == 'back') {
+      return _seeMore(page.previousIndex, total, capacity, back: true);
+    }
+    if (id == 'forward') {
+      return _seeMore(page.nextIndex, total, capacity, back: false);
+    }
+    final index = int.parse(id.substring(1));
+    final lead = index == 0 && page.start == 0;
+    return widget.itemBuilder(
+      context,
+      index,
+      lead,
+      lead ? _leadNode : null,
     );
   }
 
@@ -331,32 +453,6 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
       posterPath: path,
       focusNode: back ? _beginFocus : _endFocus,
       onTap: () => _move(total, capacity, !back),
-    );
-  }
-
-  /// One horizontal strip. Cards keep poster size, and shrink only when the
-  /// See more cards would otherwise wrap onto a second line.
-  Widget _oneRow(double width, int cols, List<Widget> tiles) {
-    if (tiles.isEmpty) return const SizedBox.shrink();
-    final natural = math.max(0.0, width - _gap * (cols - 1)) / cols;
-    final cardWidth = tiles.length <= cols
-        ? natural
-        : math.max(0.0, width - _gap * (tiles.length - 1)) / tiles.length;
-    final cardHeight = cardWidth * 3 / 2;
-    return SizedBox(
-      height: cardHeight,
-      child: Row(
-        children: [
-          for (var i = 0; i < tiles.length; i++) ...[
-            if (i > 0) const SizedBox(width: _gap),
-            SizedBox(
-              width: cardWidth,
-              height: cardHeight,
-              child: tiles[i],
-            ),
-          ],
-        ],
-      ),
     );
   }
 }

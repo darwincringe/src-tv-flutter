@@ -2,8 +2,10 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
+import 'core/history_policy.dart';
 import 'core/navigation.dart';
 import 'core/router.dart';
+import 'core/shell_return.dart';
 import 'core/theme.dart';
 import 'data/auth/auth_service.dart';
 import 'data/store/active_playback.dart';
@@ -41,6 +43,12 @@ class _SrcTvAppState extends State<SrcTvApp> with WidgetsBindingObserver {
       listenable: appRouter.routeInformationProvider,
       currentUri: () => appRouter.routeInformationProvider.value.uri.toString(),
     );
+    onDetailsBackMismatch = (path) {
+      ShellReturn.hold = true;
+      appRouter.go(path);
+      ShellReturn.hold = false;
+      ShellReturn.onShell(path);
+    };
   }
 
   @override

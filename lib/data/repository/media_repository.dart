@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/dates.dart';
+import '../helper/helper_query.dart';
 import '../introdb/introdb_client.dart';
 import '../models/details_dto.dart';
 import '../models/language.dart';
@@ -38,12 +39,13 @@ class MediaRepository {
   final Map<String, List<Episode>> _episodeCache = {};
   final Map<String, List<MediaItem>> _similarCache = {};
   final Map<String, List<MediaItem>> _searchCache = {};
+  final Map<String, _HelperSession> _helperSessions = {};
+  final Map<String, List<String>> _galleryCache = {};
 
   // ---- Row helpers -------------------------------------------------------
 
   List<MediaItem> _forRow(List<MediaItem> items) => items
       .where((i) => i.posterPath != null && i.posterPath!.isNotEmpty)
-      .take(rowLimit)
       .toList();
 
   List<MediaItem> _tag(List<MediaItem> items, String type) =>
@@ -83,8 +85,7 @@ class MediaRepository {
         final popularSeries = _forRow(results[1]);
         final netflixMovies = _tag(_withPosters(results[2]), 'movie');
         final netflixTv = _tag(_withPosters(results[3]), 'tv');
-        final netflixRow =
-            _interleave(netflixMovies, netflixTv).take(rowLimit).toList();
+        final netflixRow = _interleave(netflixMovies, netflixTv);
         final docs = _forRow(results[4]);
 
         return _nonEmpty([
@@ -155,6 +156,16 @@ class MediaRepository {
     return rows;
   }
 
+  /// Official posters for the title. Empty when TMDB has none.
+  Future<List<String>> gallery(String type, int id) async {
+    final key = '$type-$id';
+    final cached = _galleryCache[key];
+    if (cached != null) return cached;
+    final paths = await _api.posterGallery(type, id);
+    _galleryCache[key] = paths;
+    return paths;
+  }
+
   // ---- Similar / search --------------------------------------------------
 
   Future<List<MediaItem>> similar(String type, int id) async {
@@ -181,6 +192,41 @@ class MediaRepository {
         _withPosters(results.where(_isMovieOrTv).toList());
     _searchCache[key] = filtered;
     return filtered;
+  }
+
+  /// First 10 titles for a phrase such as "disturbing movies".
+  /// A later [moreByDescription] call appends the next 10.
+  Future<HelperFeed> findByDescription(String query) async {
+    final key = query.toLowerCase().trim();
+    if (key.isEmpty) return HelperFeed.empty;
+    final request = parseHelperQuery(query);
+    if (request == null) return HelperFeed.empty;
+    final session = _HelperSession(this, request);
+    _helperSessions[key] = session;
+    return session.take(_HelperSession.batch);
+  }
+
+  /// The next 10 titles for the same phrase, after [findByDescription].
+  Future<HelperFeed> moreByDescription(String query) async {
+    final key = query.toLowerCase().trim();
+    final session = _helperSessions[key];
+    if (session == null) return findByDescription(query);
+    return session.take(_HelperSession.batch);
+  }
+
+  Future<String?> _keywordIds(String? query) async {
+    if (query == null || query.trim().isEmpty) return null;
+    final found = await _api.searchKeywords(query);
+    return pickKeywordIds(
+      query,
+      [for (final k in found) TmdbKeyword(k.id, k.name)],
+    );
+  }
+
+  String? _joinKeywords(String? a, String? b) {
+    if (a == null || a.isEmpty) return b;
+    if (b == null || b.isEmpty) return a;
+    return '$a,$b';
   }
 
   // ---- Details / episodes ------------------------------------------------
@@ -403,3 +449,191 @@ class MediaRepository {
 
 final mediaRepositoryProvider =
     Provider<MediaRepository>((ref) => MediaRepository());
+
+/// Titles gathered so far for a helper phrase, and whether another batch exists.
+class HelperFeed {
+  const HelperFeed(this.items, {required this.hasMore});
+
+  final List<MediaItem> items;
+  final bool hasMore;
+
+  static const empty = HelperFeed([], hasMore: false);
+}
+
+/// Walks TMDB page by page and hands the screen [batch] titles at a time.
+class _HelperSession {
+  _HelperSession(this._repo, this.request);
+
+  static const int batch = 10;
+
+  final MediaRepository _repo;
+  final HelperRequest request;
+  final List<MediaItem> shown = [];
+  final List<MediaItem> pending = [];
+  final List<MediaItem> _movieBuf = [];
+  final List<MediaItem> _tvBuf = [];
+  final Set<String> _seen = {};
+
+  bool _prepared = false;
+  String? _moodIds;
+  String? _genreKeywordIds;
+  int _moviePage = 0;
+  int _tvPage = 0;
+  bool _movieDone = false;
+  bool _tvDone = false;
+  int? _seedId;
+  String? _seedType;
+  int _likePage = 0;
+  bool _likeDone = false;
+
+  bool get _sourcesDone => request.isLike ? _likeDone : _movieDone && _tvDone;
+
+  Future<HelperFeed> take(int count) async {
+    await _prepare();
+    var spins = 0;
+    while (pending.length < count && !_sourcesDone && spins < 40) {
+      final before = pending.length;
+      final pagesBefore = _moviePage + _tvPage + _likePage;
+      await _pull();
+      spins++;
+      if (pending.length == before &&
+          _moviePage + _tvPage + _likePage == pagesBefore) {
+        break;
+      }
+    }
+    final n = math.min(count, pending.length);
+    if (n > 0) {
+      shown.addAll(pending.sublist(0, n));
+      pending.removeRange(0, n);
+    }
+    return HelperFeed(
+      List<MediaItem>.from(shown),
+      hasMore: pending.isNotEmpty || !_sourcesDone,
+    );
+  }
+
+  Future<void> _prepare() async {
+    if (_prepared) return;
+    _prepared = true;
+    if (request.isLike) {
+      final found = await _repo.search(request.likeTitle!);
+      final wanted = found.where((item) {
+        final type = item.resolvedType('movie');
+        if (type == 'tv') return request.series;
+        return request.movies;
+      }).toList();
+      if (wanted.isEmpty) {
+        _likeDone = true;
+        return;
+      }
+      final first = wanted.first;
+      _seedType = first.resolvedType('movie');
+      _seedId = first.id;
+      return;
+    }
+    _moodIds = await _moodKeywordIds();
+    final needsGenreKeyword = request.keywordQueries.isEmpty &&
+        ((request.movies && request.movieGenreId == null) ||
+            (request.series && request.tvGenreId == null));
+    if (needsGenreKeyword) {
+      _genreKeywordIds = await _repo._keywordIds(request.genreWord);
+    }
+    if (!request.movies || !_canQuery(request.movieGenreId)) _movieDone = true;
+    if (!request.series || !_canQuery(request.tvGenreId)) _tvDone = true;
+  }
+
+  Future<String?> _moodKeywordIds() async {
+    final queries = request.keywordQueries.isNotEmpty
+        ? request.keywordQueries
+        : [if (request.mood != null && request.mood!.isNotEmpty) request.mood!];
+    final ids = <String>[];
+    for (final query in queries) {
+      final found = await _repo._keywordIds(query);
+      if (found != null && found.isNotEmpty) ids.add(found);
+    }
+    if (ids.isEmpty) return null;
+    return ids.join('|');
+  }
+
+  bool _canQuery(String? genreId) {
+    final keywords = genreId == null
+        ? _repo._joinKeywords(_moodIds, _genreKeywordIds)
+        : _moodIds;
+    return (genreId != null && genreId.isNotEmpty) ||
+        (keywords != null && keywords.isNotEmpty) ||
+        request.language != null ||
+        request.yearFrom != null;
+  }
+
+  Future<void> _pull() async {
+    if (request.isLike) {
+      await _pullLike();
+      return;
+    }
+    if (_movieBuf.isEmpty && !_movieDone) await _fetchSide('movie');
+    if (_tvBuf.isEmpty && !_tvDone) await _fetchSide('tv');
+    while (_movieBuf.isNotEmpty || _tvBuf.isNotEmpty) {
+      if (_movieBuf.isNotEmpty) pending.add(_movieBuf.removeAt(0));
+      if (_tvBuf.isNotEmpty) pending.add(_tvBuf.removeAt(0));
+    }
+  }
+
+  Future<void> _fetchSide(String type) async {
+    final movies = type == 'movie';
+    if (movies ? _movieDone : _tvDone) return;
+    final genreId = movies ? request.movieGenreId : request.tvGenreId;
+    if (!_canQuery(genreId)) {
+      if (movies) {
+        _movieDone = true;
+      } else {
+        _tvDone = true;
+      }
+      return;
+    }
+    final pageNumber = movies ? ++_moviePage : ++_tvPage;
+    final page = await _repo._api.discoverFiltered(
+      type,
+      genres: genreId,
+      keywords: genreId == null
+          ? _repo._joinKeywords(_moodIds, _genreKeywordIds)
+          : _moodIds,
+      language: request.language,
+      yearFrom: request.yearFrom,
+      yearTo: request.yearTo,
+      page: pageNumber,
+      withoutGenres: request.withoutGenres,
+      minRating: request.minRating,
+    );
+    final buf = movies ? _movieBuf : _tvBuf;
+    buf.addAll(_accept(page.items, type));
+    if (page.isLast) {
+      if (movies) {
+        _movieDone = true;
+      } else {
+        _tvDone = true;
+      }
+    }
+  }
+
+  Future<void> _pullLike() async {
+    if (_likeDone || _seedId == null || _seedType == null) {
+      _likeDone = true;
+      return;
+    }
+    final page = await _repo._api.recommendationsPage(
+      _seedType!,
+      _seedId!,
+      ++_likePage,
+    );
+    pending.addAll(_accept(page.items, _seedType!));
+    if (page.isLast) _likeDone = true;
+  }
+
+  List<MediaItem> _accept(List<MediaItem> items, String type) {
+    final fresh = <MediaItem>[];
+    for (final item in _repo._withPosters(_repo._tag(items, type))) {
+      if (_seen.add('$type-${item.id}')) fresh.add(item);
+    }
+    return fresh;
+  }
+}

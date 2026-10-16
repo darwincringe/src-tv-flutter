@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:srctv_flutter/core/history_policy.dart';
+import 'package:srctv_flutter/core/shell_return.dart';
 
 void main() {
   test('back skips another episode of the same title', () {
@@ -14,6 +15,50 @@ void main() {
   test('back skips a duplicate of the same page', () {
     final page = Uri.parse('/details/tv/7');
     expect(shouldSkipHistoryEntry(page, page), isTrue);
+  });
+
+  test('back from a title returns to search instead of home', () {
+    expect(
+      detailsBackMismatch(
+        left: Uri.parse('/details/movie/27205'),
+        landed: Uri.parse('/home'),
+        shellPath: '/search',
+      ),
+      '/search',
+    );
+    expect(
+      detailsBackMismatch(
+        left: Uri.parse('/details/tv/1396'),
+        landed: Uri.parse('/home'),
+        shellPath: '/helper',
+      ),
+      '/helper',
+    );
+    expect(
+      detailsBackMismatch(
+        left: Uri.parse('/details/movie/27205'),
+        landed: Uri.parse('/search'),
+        shellPath: '/search',
+      ),
+      isNull,
+    );
+    expect(
+      detailsBackMismatch(
+        left: Uri.parse('/details/movie/27205'),
+        landed: Uri.parse('/details/movie/155'),
+        shellPath: '/search',
+      ),
+      isNull,
+    );
+  });
+
+  test('details back steps to the previous title then the tab', () {
+    ShellReturn.hold = false;
+    ShellReturn.onShell('/search');
+    ShellReturn.onOpenDetails('/search', '/details/movie/1');
+    ShellReturn.onOpenDetails('/details/movie/1', '/details/movie/2');
+    expect(ShellReturn.pop(), '/details/movie/1');
+    expect(ShellReturn.pop(), '/search');
   });
 
   test('back stops on details and on a different title', () {

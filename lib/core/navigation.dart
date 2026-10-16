@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../ui/player/player_args.dart';
 import 'history_stub.dart' if (dart.library.html) 'history_web.dart';
+import 'shell_return.dart';
 
 /// Navigation helpers. Details and the player are full-screen routes on the
 /// root navigator.
@@ -22,7 +23,21 @@ void _navTo(BuildContext context, String location, {Object? extra}) {
 }
 
 void openDetails(BuildContext context, String type, int id) {
-  _navTo(context, '/details/$type/$id');
+  final to = '/details/$type/$id';
+  ShellReturn.onOpenDetails(GoRouterState.of(context).uri.path, to);
+  _navTo(context, to);
+}
+
+/// Leave a title. On the web the shell was replaced, so return to the tab
+/// that opened it. Search and Helper keep their query. Another title opened
+/// from this page is one step back, then the tab.
+void backFromDetails(BuildContext context) {
+  if (!kIsWeb) {
+    navBack(context);
+    return;
+  }
+  final target = ShellReturn.pop();
+  Router.neglect(context, () => context.go(target));
 }
 
 /// The shareable, refresh-safe player location for a title. TV episodes carry

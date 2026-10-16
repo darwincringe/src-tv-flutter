@@ -12,6 +12,7 @@ import '../ui/movies/movies_screen.dart';
 import '../ui/player/player_args.dart';
 import '../ui/player/player_view.dart';
 import '../ui/player/youtube_trailer_screen.dart';
+import '../ui/helper/helper_screen.dart';
 import '../ui/search/search_screen.dart';
 import '../ui/series/series_screen.dart';
 import '../ui/settings/settings_screen.dart';
@@ -19,9 +20,9 @@ import '../ui/shell/app_shell.dart';
 
 final rootNavigatorKey = GlobalKey<NavigatorState>();
 
-/// Branch order matches the nav rail: Search, Home, Movies, TV Series, Library,
-/// Settings. The app opens on Home via [initialLocation]. Details and the
-/// player are full-screen routes on the root navigator.
+/// Branch order matches the nav rail: Search, Helper, Home, Movies, TV Series,
+/// Library, Settings. The app opens on Home via [initialLocation]. Details and
+/// the player are full-screen routes on the root navigator.
 final GoRouter appRouter = GoRouter(
   navigatorKey: rootNavigatorKey,
   initialLocation: '/home',
@@ -56,6 +57,9 @@ final GoRouter appRouter = GoRouter(
           routes: [GoRoute(path: '/search', builder: (c, s) => const SearchScreen())],
         ),
         StatefulShellBranch(
+          routes: [GoRoute(path: '/helper', builder: (c, s) => const HelperScreen())],
+        ),
+        StatefulShellBranch(
           routes: [GoRoute(path: '/home', builder: (c, s) => const HomeScreen())],
         ),
         StatefulShellBranch(
@@ -75,10 +79,17 @@ final GoRouter appRouter = GoRouter(
     GoRoute(
       path: '/details/:type/:id',
       parentNavigatorKey: rootNavigatorKey,
-      builder: (c, s) => DetailsScreen(
-        mediaType: s.pathParameters['type']!,
-        id: int.parse(s.pathParameters['id']!),
-      ),
+      builder: (c, s) {
+        final type = s.pathParameters['type']!;
+        final id = s.pathParameters['id']!;
+        // A new key so picking another title from this page actually loads it.
+        // Without one, the same details screen stays up and the click looks dead.
+        return DetailsScreen(
+          key: ValueKey('$type-$id'),
+          mediaType: type,
+          id: int.parse(id),
+        );
+      },
     ),
     // Path-based so the URL identifies the video (shareable + survives a
     // refresh): /watch/movie/<id> or /watch/tv/<id>?s=<season>&e=<episode>.

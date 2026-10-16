@@ -4,6 +4,21 @@ import '../models/details_dto.dart';
 import '../models/media_item.dart';
 import 'tmdb_client.dart';
 
+/// One page of a TMDB list, plus how many pages exist after it.
+class TmdbListPage {
+  const TmdbListPage({
+    required this.items,
+    required this.page,
+    required this.totalPages,
+  });
+
+  final List<MediaItem> items;
+  final int page;
+  final int totalPages;
+
+  bool get isLast => items.isEmpty || page >= totalPages;
+}
+
 /// Thin wrapper over the TMDB v3 endpoints the app uses. Mirrors the 19
 /// endpoints declared in the Kotlin `TmdbApi.kt`.
 class TmdbApi {
@@ -15,12 +30,24 @@ class TmdbApi {
     String path, [
     Map<String, dynamic>? params,
   ]) async {
+    final page = await _page(path, params);
+    return page.items;
+  }
+
+  Future<TmdbListPage> _page(
+    String path, [
+    Map<String, dynamic>? params,
+  ]) async {
     final resp = await _dio.get(path, queryParameters: params);
     final data = resp.data as Map<String, dynamic>;
     final results = (data['results'] as List?) ?? const [];
-    return results
-        .map((e) => MediaItem.fromJson(e as Map<String, dynamic>))
-        .toList();
+    return TmdbListPage(
+      items: results
+          .map((e) => MediaItem.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      page: (data['page'] as num?)?.toInt() ?? 1,
+      totalPages: (data['total_pages'] as num?)?.toInt() ?? 1,
+    );
   }
 
   // Trending
@@ -48,6 +75,108 @@ class TmdbApi {
         'discover/tv',
         {'with_genres': genreIds, 'sort_by': 'popularity.desc'},
       );
+
+  /// Free-form discover used by the content helper. [type] is `movie` or `tv`.
+  Future<TmdbListPage> discoverFiltered(
+    String type, {
+    String? genres,
+    String? keywords,
+    String? language,
+    int? yearFrom,
+    int? yearTo,
+    int page = 1,
+    String? withoutGenres,
+    double? minRating,
+  }) {
+    final params = <String, dynamic>{
+      'sort_by': 'popularity.desc',
+      'vote_count.gte': 40,
+      'include_adult': false,
+      'page': page,
+    };
+    if (genres != null && genres.isNotEmpty) params['with_genres'] = genres;
+    if (withoutGenres != null && withoutGenres.isNotEmpty) {
+      params['without_genres'] = withoutGenres;
+    }
+    if (minRating != null) params['vote_average.gte'] = minRating;
+    if (keywords != null && keywords.isNotEmpty) {
+      params['with_keywords'] = keywords;
+    }
+    if (language != null && language.isNotEmpty) {
+      params['with_original_language'] = language;
+    }
+    if (type == 'movie') {
+      if (yearFrom != null) {
+        params['primary_release_date.gte'] = '$yearFrom-01-01';
+      }
+      if (yearTo != null) {
+        params['primary_release_date.lte'] = '$yearTo-12-31';
+      }
+    } else {
+      if (yearFrom != null) params['first_air_date.gte'] = '$yearFrom-01-01';
+      if (yearTo != null) params['first_air_date.lte'] = '$yearTo-12-31';
+    }
+    return _page('discover/$type', params);
+  }
+
+  /// Recommendations for one title, one TMDB page at a time.
+  Future<TmdbListPage> recommendationsPage(String type, int id, int page) =>
+      _page('$type/$id/recommendations', {'page': page});
+
+  /// Official posters only. Scene stills and backdrops are left out so the
+  /// gallery does not spoil the story.
+  Future<List<String>> posterGallery(String type, int id) async {
+    final resp = await _dio.get('$type/$id/images');
+    final data = resp.data as Map<String, dynamic>;
+    final raw = (data['posters'] as List?) ?? const [];
+    final ranked = <({String path, int votes, bool safe})>[];
+    for (final item in raw) {
+      if (item is! Map) continue;
+      final path = item['file_path'] as String?;
+      if (path == null || path.isEmpty) continue;
+      final width = (item['width'] as num?)?.toInt() ?? 0;
+      if (width > 0 && width < 300) continue;
+      final lang = item['iso_639_1'] as String?;
+      final safe = lang == null || lang.isEmpty || lang == 'en';
+      ranked.add((
+        path: path,
+        votes: (item['vote_count'] as num?)?.toInt() ?? 0,
+        safe: safe,
+      ));
+    }
+    ranked.sort((a, b) {
+      if (a.safe != b.safe) return a.safe ? -1 : 1;
+      return b.votes.compareTo(a.votes);
+    });
+    final seen = <String>{};
+    final out = <String>[];
+    for (final poster in ranked.where((p) => p.safe)) {
+      if (seen.add(poster.path)) out.add(poster.path);
+      if (out.length == 12) return out;
+    }
+    for (final poster in ranked) {
+      if (seen.add(poster.path)) out.add(poster.path);
+      if (out.length == 12) break;
+    }
+    return out;
+  }
+
+  Future<List<({int id, String name})>> searchKeywords(String query) async {
+    final resp = await _dio.get(
+      'search/keyword',
+      queryParameters: {'query': query},
+    );
+    final data = resp.data as Map<String, dynamic>;
+    final results = (data['results'] as List?) ?? const [];
+    return [
+      for (final raw in results)
+        if (raw is Map)
+          (
+            id: (raw['id'] as num).toInt(),
+            name: (raw['name'] as String?) ?? '',
+          ),
+    ];
+  }
 
   // Discover by watch provider
   Future<List<MediaItem>> discoverMoviesByProvider(

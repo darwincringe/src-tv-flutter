@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:web/web.dart' as web;
 
 import 'history_policy.dart';
+import 'shell_return.dart';
 
 Uri _current = Uri.parse('/');
 var _skips = 0;
@@ -36,6 +37,19 @@ void _onPop() {
     return;
   }
   _skips = 0;
+  final want = detailsBackMismatch(
+    left: left,
+    landed: landed,
+    shellPath: ShellReturn.shell,
+  );
+  if (want != null) {
+    // Flutter applies this pop next and may show Home. Hold that tab, then
+    // move to the one that actually opened the title.
+    ShellReturn.hold = true;
+    Future<void>.delayed(Duration.zero, () => onDetailsBackMismatch?.call(want));
+    return;
+  }
+  ShellReturn.landed(landed.path);
 }
 
 /// True when Back stays inside this visit. The engine stores that depth on the
