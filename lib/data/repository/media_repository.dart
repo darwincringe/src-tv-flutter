@@ -29,7 +29,6 @@ class MediaRepository {
   final StreamClient _stream;
   final IntroDbClient _introDb;
 
-  static const int rowLimit = 10;
   static const String netflix = '8';
   static const String region = 'PH';
 
@@ -411,7 +410,7 @@ class MediaRepository {
         if (byFreq != 0) return byFreq;
         return (b.voteAverage ?? 0).compareTo(a.voteAverage ?? 0);
       });
-    return ranked.take(rowLimit).toList();
+    return ranked;
   }
 
   /// Continue-watching entries, enriched with title/poster from cached details.
