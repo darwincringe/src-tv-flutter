@@ -155,7 +155,11 @@ class _SlidingWindowState extends State<SlidingWindow>
   bool _animating = false;
   bool _forward = true;
   bool _narrowPortrait = false;
-  int? _alignedStart;
+  double _stripStride = 194;
+  double? _anchorScreenX;
+  double? _anchorFromX;
+  double? _anchorToX;
+  bool _anchorSyncQueued = false;
   FocusNode? _pendingFocus;
   final ScrollController _scroller = ScrollController();
   final Map<String, Widget> _flying = {};
@@ -168,10 +172,12 @@ class _SlidingWindowState extends State<SlidingWindow>
   void initState() {
     super.initState();
     _slide = AnimationController(vsync: this, duration: _slideDuration);
+    _slide.addListener(_onSlide);
   }
 
   @override
   void dispose() {
+    _slide.removeListener(_onSlide);
     _slide.dispose();
     _scroller.dispose();
     _beginFocus.dispose();
@@ -236,12 +242,37 @@ class _SlidingWindowState extends State<SlidingWindow>
                 : (forward ? _endFocus : _beginFocus);
     _flying.clear();
     if (_narrowPortrait) {
-      setState(() {
-        _start = next;
-        if (widget.titleLimit != null) _expanded = nextExpanded;
+      _rememberAnchor(
+        tapped: forward ? 'forward' : 'back',
+        next: next,
+        nextExpanded: nextExpanded,
+        total: total,
+        capacity: capacity,
+      );
+      if (MediaQuery.disableAnimationsOf(context)) {
+        setState(() {
+          _start = next;
+          if (widget.titleLimit != null) _expanded = nextExpanded;
+        });
+        _pendingStart = null;
+        _pendingExpanded = null;
+        _scheduleAnchorSync(forceEnd: true);
+        return;
+      }
+      setState(() => _animating = true);
+      _slide.forward(from: 0).whenComplete(() {
+        if (!mounted) return;
+        setState(() {
+          if (_pendingStart != null) _start = _pendingStart!;
+          if (_pendingExpanded != null) _expanded = _pendingExpanded!;
+          _pendingStart = null;
+          _pendingExpanded = null;
+          _animating = false;
+          _flying.clear();
+        });
+        _slide.value = 0;
+        _scheduleAnchorSync(forceEnd: true);
       });
-      _pendingStart = null;
-      _pendingExpanded = null;
       return;
     }
     if (MediaQuery.disableAnimationsOf(context)) {
@@ -322,7 +353,109 @@ class _SlidingWindowState extends State<SlidingWindow>
     );
   }
 
-  /// Phone portrait scrolls the page. See more stays the last cell.
+  void _onSlide() {
+    if (!_narrowPortrait || !_animating) return;
+    _scheduleAnchorSync(forceEnd: false);
+  }
+
+  void _scheduleAnchorSync({required bool forceEnd}) {
+    if (_anchorSyncQueued) return;
+    _anchorSyncQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _anchorSyncQueued = false;
+      _syncAnchorScroll(forceEnd: forceEnd);
+    });
+  }
+
+  void _rememberAnchor({
+    required String tapped,
+    required int next,
+    required bool nextExpanded,
+    required int total,
+    required int capacity,
+  }) {
+    final fromX = _stripContentX(tapped, _start, _expanded, total, capacity);
+    _anchorFromX = fromX;
+    _anchorScreenX = fromX == null || !_scroller.hasClients
+        ? null
+        : fromX - _scroller.offset;
+    final nextId = _anchorOnPage(tapped, next, nextExpanded, total, capacity);
+    _anchorToX = _stripContentX(nextId, next, nextExpanded, total, capacity);
+  }
+
+  PosterWindow _stripPage(
+    int start,
+    bool expanded,
+    int total,
+    int capacity,
+  ) {
+    if (widget.titleLimit == null) {
+      return posterWindow(start: start, total: total, capacity: capacity);
+    }
+    return titleWindow(
+      start: start,
+      total: total,
+      expanded: expanded,
+      initial: widget.initialTitles,
+      limit: widget.titleLimit!,
+    );
+  }
+
+  String _anchorOnPage(
+    String tapped,
+    int start,
+    bool expanded,
+    int total,
+    int capacity,
+  ) {
+    final page = _stripPage(start, expanded, total, capacity);
+    if (tapped == 'forward' && page.canForward) return 'forward';
+    if (tapped == 'back' && page.canBack) return 'back';
+    if (page.shown <= 0) return tapped;
+    if (tapped == 'forward') return 'p${page.start + page.shown - 1}';
+    return 'p${page.start}';
+  }
+
+  double? _stripContentX(
+    String id,
+    int start,
+    bool expanded,
+    int total,
+    int capacity,
+  ) {
+    final page = _stripPage(start, expanded, total, capacity);
+    final ids = <String>[];
+    if (page.canBack) ids.add('back');
+    for (var i = 0; i < page.shown; i++) {
+      ids.add('p${page.start + i}');
+    }
+    if (page.canForward) ids.add('forward');
+    final index = ids.indexOf(id);
+    if (index < 0) return null;
+    final col = index ~/ math.max(1, widget.rows);
+    return col * _stripStride;
+  }
+
+  void _syncAnchorScroll({required bool forceEnd}) {
+    final screen = _anchorScreenX;
+    final from = _anchorFromX;
+    final to = _anchorToX;
+    if (screen == null || from == null || to == null || !_scroller.hasClients) {
+      return;
+    }
+    final t = forceEnd
+        ? 1.0
+        : Curves.easeOutCubic.transform(_slide.value.clamp(0.0, 1.0));
+    final x = from + (to - from) * t;
+    final max = _scroller.position.maxScrollExtent;
+    final target = (x - screen).clamp(0.0, max);
+    if ((_scroller.offset - target).abs() > 0.5) {
+      _scroller.jumpTo(target);
+    }
+  }
+
+  /// Phone portrait scrolls the page. See more stays where it was tapped
+  /// while the posters slide.
   Widget _portraitStrip(double width, bool expanded) {
     final total = widget.itemCount;
     final rows = math.max(1, widget.rows);
@@ -330,72 +463,80 @@ class _SlidingWindowState extends State<SlidingWindow>
     final cardHeight = cardWidth / widget.cardAspect + widget.extraHeight;
     final pageCols = math.max(4, (width / (cardWidth + widget.gap)).ceil() + 2);
     final capacity = pageCols * rows;
-    final page = widget.titleLimit == null
-        ? posterWindow(start: _start, total: total, capacity: capacity)
-        : titleWindow(
-            start: _start,
-            total: total,
-            expanded: expanded,
-            initial: widget.initialTitles,
-            limit: widget.titleLimit!,
-          );
-    final ids = <String>[];
-    if (page.canBack) ids.add('back');
-    for (var i = 0; i < page.shown; i++) {
-      ids.add('p${page.start + i}');
-    }
-    if (page.canForward) ids.add('forward');
-    if (ids.isEmpty) return const SizedBox.shrink();
+    _stripStride = cardWidth + widget.gap;
 
     Rect at(int slot) {
       final col = slot ~/ rows;
       final row = slot % rows;
       return Rect.fromLTWH(
-        col * (cardWidth + widget.gap),
+        col * _stripStride,
         row * (cardHeight + widget.gap),
         cardWidth,
         cardHeight,
       );
     }
 
-    final placed = [
-      for (var i = 0; i < ids.length; i++)
-        _Slot(
-          id: ids[i],
-          rect: at(i),
-          child: _childForId(ids[i], page, total, capacity),
-        ),
-    ];
-    final contentWidth = placed.map((slot) => slot.rect.right).reduce(math.max);
-    final height = placed.map((slot) => slot.rect.bottom).reduce(math.max);
-    if (_alignedStart != _start) {
-      _alignedStart = _start;
-      final target = page.canBack ? cardWidth + widget.gap : 0.0;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || !_scroller.hasClients) return;
-        final max = _scroller.position.maxScrollExtent;
-        _scroller.jumpTo(target.clamp(0.0, max));
-      });
-    }
-    return SizedBox(
-      width: width,
-      height: height,
-      child: SingleChildScrollView(
-        controller: _scroller,
-        scrollDirection: Axis.horizontal,
-        clipBehavior: Clip.hardEdge,
-        child: SizedBox(
-          width: math.max(width, contentWidth),
-          height: height,
-          child: Stack(
-            clipBehavior: Clip.none,
-            children: [
-              for (final slot in placed)
-                Positioned.fromRect(rect: slot.rect, child: slot.child),
-            ],
+    List<_Slot> slotsFor(int start, bool pageExpanded) {
+      final page = _stripPage(start, pageExpanded, total, capacity);
+      final ids = <String>[];
+      if (page.canBack) ids.add('back');
+      for (var i = 0; i < page.shown; i++) {
+        ids.add('p${page.start + i}');
+      }
+      if (page.canForward) ids.add('forward');
+      return [
+        for (var i = 0; i < ids.length; i++)
+          _Slot(
+            id: ids[i],
+            rect: at(i),
+            child: _childForId(ids[i], page, total, capacity),
           ),
-        ),
-      ),
+      ];
+    }
+
+    return AnimatedBuilder(
+      animation: _slide,
+      builder: (context, _) {
+        final current = slotsFor(_start, expanded);
+        final incoming = _animating && _pendingStart != null
+            ? slotsFor(_pendingStart!, _pendingExpanded ?? expanded)
+            : null;
+        final placed = incoming == null
+            ? current
+            : _slideHorizontal(
+                current,
+                incoming,
+                (_scroller.hasClients ? _scroller.offset : 0) + width,
+              );
+        if (placed.isEmpty) return const SizedBox.shrink();
+        final contentWidth = [
+          ...current,
+          ...?incoming,
+          ...placed,
+        ].map((slot) => slot.rect.right).reduce(math.max);
+        final height = placed.map((slot) => slot.rect.bottom).reduce(math.max);
+        return SizedBox(
+          width: width,
+          height: height,
+          child: SingleChildScrollView(
+            controller: _scroller,
+            scrollDirection: Axis.horizontal,
+            physics: _animating ? const NeverScrollableScrollPhysics() : null,
+            clipBehavior: Clip.hardEdge,
+            child: SizedBox(
+              width: math.max(width, contentWidth),
+              height: height,
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  for (final slot in placed)
+                    Positioned.fromRect(rect: slot.rect, child: slot.child),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 
