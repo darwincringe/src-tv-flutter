@@ -63,6 +63,17 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
     // resume) so the row updates immediately after watching something.
     WatchProgressStore.revision.addListener(_onAccountData);
     RecommendationSeeds.revision.addListener(_onAccountData);
+  }
+
+  bool _activated = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // The shell keeps every tab alive. Only the visible one should talk to
+    // TMDB, otherwise Home also pays for Movies and Series.
+    if (_activated || !TickerMode.valuesOf(context).enabled) return;
+    _activated = true;
     _load();
   }
 
@@ -77,12 +88,12 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
   }
 
   void _onAccountData() {
-    if (mounted && _rows != null) _loadPersonalized();
+    if (mounted && _activated && _rows != null) _loadPersonalized();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && _rows != null) {
+    if (state == AppLifecycleState.resumed && _activated && _rows != null) {
       _loadPersonalized();
     }
   }
@@ -142,7 +153,11 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
     _heroDebounce = Timer(const Duration(milliseconds: 350), () async {
       try {
         final type = item.resolvedType(fallbackType);
-        final d = await ref.read(mediaRepositoryProvider).details(type, item.id);
+        final d = await ref.read(mediaRepositoryProvider).details(
+              type,
+              item.id,
+              extras: false,
+            );
         if (mounted && reqId == _heroReqId) setState(() => _heroDetails = d);
       } catch (_) {}
     });
@@ -152,7 +167,9 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
     final reqId = ++_heroReqId;
     _heroDebounce?.cancel();
     try {
-      final d = await ref.read(mediaRepositoryProvider).details(p.type, p.tmdbId);
+      final d = await ref
+          .read(mediaRepositoryProvider)
+          .details(p.type, p.tmdbId, extras: false);
       if (!mounted || reqId != _heroReqId) return;
       setState(() {
         _hero = MediaItem(

@@ -62,6 +62,7 @@ void playStream(
   int? season,
   int? episode,
   String? backdropPath,
+  String? posterPath,
 }) {
   _navTo(
     context,
@@ -75,6 +76,7 @@ void playStream(
       season: season,
       episode: episode,
       backdropPath: backdropPath,
+      posterPath: posterPath,
     ),
   );
 }

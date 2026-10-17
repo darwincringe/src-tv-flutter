@@ -30,12 +30,17 @@ class PlayerArgs {
   /// screen immediately (at 0%), so no extra TMDB call is needed to display it.
   final String? backdropPath;
 
+  /// Real poster, stored with Continue Watching so Home does not look the
+  /// title up again just to fix a backdrop saved in its place.
+  final String? posterPath;
+
   const PlayerArgs.stream({
     required this.tmdbId,
     required this.type,
     this.season,
     this.episode,
     this.backdropPath,
+    this.posterPath,
   })  : mode = PlayerMode.stream,
         trailerKey = null;
 
@@ -45,5 +50,6 @@ class PlayerArgs {
         type = null,
         season = null,
         episode = null,
-        backdropPath = null;
+        backdropPath = null,
+        posterPath = null;
 }

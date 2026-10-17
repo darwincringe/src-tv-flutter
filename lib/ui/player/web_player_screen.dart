@@ -298,7 +298,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
       // Details once (title, isTv, seasons for episode nav).
       if (_title == null) {
         try {
-          final d = await repo.details(_a.type!, _a.tmdbId!);
+          final d = await repo.details(_a.type!, _a.tmdbId!, extras: false);
           _title = d.title;
           _isTv = d.isTv;
           _seasons = d.seasons;
@@ -622,7 +622,8 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
       durationMs: dur,
       updatedAt: _now,
       title: _title,
-      posterPath: _a.backdropPath,
+      posterPath: _a.posterPath ?? _a.backdropPath,
+      posterChecked: _a.posterPath != null && _a.posterPath!.isNotEmpty,
       completed: false,
     ));
   }
@@ -640,7 +641,8 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
         durationMs: 0,
         updatedAt: _now,
         title: _title,
-        posterPath: _a.backdropPath,
+        posterPath: _a.posterPath ?? _a.backdropPath,
+      posterChecked: _a.posterPath != null && _a.posterPath!.isNotEmpty,
         completed: false,
       ), finishedSeason: _season, finishedEpisode: _episode);
     } else {
@@ -655,7 +657,8 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
         durationMs: dur,
         updatedAt: _now,
         title: _title,
-        posterPath: _a.backdropPath,
+        posterPath: _a.posterPath ?? _a.backdropPath,
+      posterChecked: _a.posterPath != null && _a.posterPath!.isNotEmpty,
         completed: true,
       ));
     }

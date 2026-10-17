@@ -27,9 +27,17 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
   void initState() {
     super.initState();
     LibraryStore.revision.addListener(_onChange);
-    // Watching something re-sorts the library (last-watched order).
     WatchProgressStore.revision.addListener(_onChange);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _loadContinue());
+  }
+
+  bool _activated = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_activated || !TickerMode.valuesOf(context).enabled) return;
+    _activated = true;
+    _loadContinue();
   }
 
   @override
@@ -40,7 +48,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
   }
 
   void _onChange() {
-    if (!mounted) return;
+    if (!mounted || !_activated) return;
     setState(() {});
     _loadContinue();
   }

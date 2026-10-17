@@ -174,6 +174,7 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
         tmdbId: d.id,
         type: 'movie',
         backdropPath: d.backdropPath,
+        posterPath: d.posterPath,
       );
       return;
     }
@@ -186,6 +187,7 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
         season: saved!.season,
         episode: saved.episode,
         backdropPath: d.backdropPath,
+        posterPath: d.posterPath,
       );
       return;
     }
@@ -502,6 +504,7 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
                       season: _selectedSeason,
                       episode: ep.episodeNumber,
                       backdropPath: d.backdropPath,
+        posterPath: d.posterPath,
                     ),
                   );
                 },

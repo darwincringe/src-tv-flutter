@@ -36,6 +36,7 @@ class MediaRepository {
   // Caches
   final Map<String, List<CategoryRow>> _pageCache = {};
   final Map<String, MediaDetails> _detailsCache = {};
+  final Map<String, Future<MediaDetails>> _detailsInflight = {};
   final Map<String, List<Episode>> _episodeCache = {};
   final Map<String, List<MediaItem>> _similarCache = {};
   final Map<String, List<MediaItem>> _searchCache = {};
@@ -231,20 +232,45 @@ class MediaRepository {
 
   // ---- Details / episodes ------------------------------------------------
 
-  Future<MediaDetails> details(String type, int id) async {
-    final key = '$type-$id';
-    final cached = _detailsCache[key];
-    if (cached != null) return cached;
-    final MediaDetails d;
-    if (type == 'tv') {
-      final dto = await _api.tvDetails(id);
-      d = _tvToDetails(dto, comingSoon: isComingSoon(dto.firstAirDate));
-    } else {
-      final dto = await _api.movieDetails(id);
-      d = _movieToDetails(dto, comingSoon: await _movieComingSoon(id));
+  /// [extras] adds cast, trailer, and the theatrical Coming Soon check.
+  /// Home only needs the poster and hero line, so it leaves this off.
+  Future<MediaDetails> details(String type, int id, {bool extras = true}) {
+    final fullKey = '$type-$id';
+    final key = extras ? fullKey : '$fullKey#lite';
+    final cached = _detailsCache[key] ?? (extras ? null : _detailsCache[fullKey]);
+    if (cached != null) return Future.value(cached);
+    final pending = _detailsInflight[key] ??
+        (extras ? null : _detailsInflight[fullKey]);
+    if (pending != null) return pending;
+    final future = _loadDetails(type, id, extras: extras, key: key);
+    _detailsInflight[key] = future;
+    return future;
+  }
+
+  Future<MediaDetails> _loadDetails(
+    String type,
+    int id, {
+    required bool extras,
+    required String key,
+  }) async {
+    try {
+      final MediaDetails d;
+      if (type == 'tv') {
+        final dto = await _api.tvDetails(id, extras: extras);
+        d = _tvToDetails(dto, comingSoon: isComingSoon(dto.firstAirDate));
+      } else {
+        final dto = await _api.movieDetails(id, extras: extras);
+        final soon = extras
+            ? await _movieComingSoon(id)
+            : isComingSoon(dto.releaseDate);
+        d = _movieToDetails(dto, comingSoon: soon);
+      }
+      _detailsCache[key] = d;
+      if (extras) _detailsCache['$type-$id#lite'] = d;
+      return d;
+    } finally {
+      _detailsInflight.remove(key);
     }
-    _detailsCache[key] = d;
-    return d;
   }
 
   Future<List<Episode>> episodes(int id, int season) async {
@@ -398,7 +424,9 @@ class MediaRepository {
     if (scope != 'home') {
       seeds = seeds.where((s) => s.type == scope).toList();
     }
-    seeds = seeds.take(12).toList();
+    // Each seed is its own recommendations request. Four is enough to rank
+    // a row, without firing a dozen calls every time Home opens.
+    seeds = seeds.take(4).toList();
     if (seeds.isEmpty) return [];
 
     final exclude = combined.keys.toSet();
@@ -441,27 +469,53 @@ class MediaRepository {
     final progs = WatchProgressStore.all()
         .where((p) => p.completed || p.isResumable || p.type == 'tv')
         .toList();
-    // Always prefer the TMDB poster (portrait key art with the title on it):
-    // some stored records carry a backdrop/hero path, which shows up in the row
-    // as a title-less image. details() is cached, so this is cheap on repeat
-    // loads; fetch concurrently so a cold load is ~one round-trip, not N.
-    return Future.wait(progs.map((p) async {
+    // Some records store a backdrop in posterPath. A lite details call
+    // replaces it with the real poster and skips cast, videos, and the
+    // Coming Soon lookups. A few at a time, so a long list doesn't stampede.
+    return _mapLimited(progs, (p) async {
+      if (p.posterChecked && (p.posterPath?.isNotEmpty ?? false)) return p;
       try {
-        final d = await details(p.type, p.tmdbId);
-        return p.copyWith(
+        final d = await details(p.type, p.tmdbId, extras: false);
+        final fixed = p.copyWith(
           title: (p.title?.isNotEmpty ?? false) ? p.title : d.title,
           // d.posterPath is the titled poster; only fall back to the stored
           // path when TMDB has none, so we never drop the image entirely.
           posterPath: (d.posterPath?.isNotEmpty ?? false)
               ? d.posterPath
               : p.posterPath,
+          posterChecked: true,
         );
+        WatchProgressStore.save(fixed);
+        return fixed;
       } catch (_) {
         // Never drop a continuable entry just because details failed.
         return p;
       }
-    }));
+    });
   }
+}
+
+/// Runs [fn] over [items] with at most [limit] calls in flight.
+Future<List<T>> _mapLimited<T>(
+  List<T> items,
+  Future<T> Function(T item) fn, {
+  int limit = 4,
+}) async {
+  if (items.isEmpty) return [];
+  final out = List<T?>.filled(items.length, null);
+  var next = 0;
+  Future<void> worker() async {
+    while (true) {
+      final i = next;
+      next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i]);
+    }
+  }
+
+  final workers = math.min(limit, items.length);
+  await Future.wait([for (var n = 0; n < workers; n++) worker()]);
+  return [for (final item in out) item as T];
 }
 
 final mediaRepositoryProvider =

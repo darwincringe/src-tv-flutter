@@ -59,10 +59,13 @@ WatchProgress retainWatched(
     durationMs: next.durationMs,
     updatedAt: next.updatedAt,
     title: next.title,
-    posterPath: next.posterPath,
+    posterPath: (previous?.posterChecked ?? false) && !next.posterChecked
+        ? (previous!.posterPath ?? next.posterPath)
+        : next.posterPath,
     completed: next.completed,
     watched: movieWatched,
     watchedEpisodes: seen.toList(),
+    posterChecked: next.posterChecked || (previous?.posterChecked ?? false),
   );
 }
 
@@ -86,6 +89,10 @@ class WatchProgress {
   /// Episodes of a series that reached 95% at least once (`season-episode`).
   final List<String> watchedEpisodes;
 
+  /// True once [posterPath] is the real poster, not a backdrop. Home then
+  /// skips another details lookup for this title.
+  final bool posterChecked;
+
   const WatchProgress({
     required this.tmdbId,
     required this.type,
@@ -99,6 +106,7 @@ class WatchProgress {
     this.completed = false,
     this.watched = false,
     this.watchedEpisodes = const [],
+    this.posterChecked = false,
   });
 
   /// Far enough in to resume, but not within 10s of the end.
@@ -147,6 +155,7 @@ class WatchProgress {
     bool? completed,
     bool? watched,
     List<String>? watchedEpisodes,
+    bool? posterChecked,
   }) =>
       WatchProgress(
         tmdbId: tmdbId,
@@ -161,6 +170,7 @@ class WatchProgress {
         completed: completed ?? this.completed,
         watched: watched ?? this.watched,
         watchedEpisodes: watchedEpisodes ?? this.watchedEpisodes,
+        posterChecked: posterChecked ?? this.posterChecked,
       );
 
   Map<String, dynamic> toJson() => {
@@ -176,6 +186,7 @@ class WatchProgress {
         'completed': completed,
         'watched': watched,
         'watchedEpisodes': watchedEpisodes,
+        'posterChecked': posterChecked,
       };
 
   factory WatchProgress.fromJson(Map<String, dynamic> j) => WatchProgress(
@@ -194,6 +205,7 @@ class WatchProgress {
           for (final e in (j['watchedEpisodes'] as List?) ?? const [])
             e.toString(),
         ],
+        posterChecked: (j['posterChecked'] as bool?) ?? false,
       );
 }
 

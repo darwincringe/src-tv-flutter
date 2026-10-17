@@ -375,7 +375,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
       if (_mediaTitle == null) {
         try {
-          final d = await repo.details(_type, _tmdbId);
+          final d = await repo.details(_type, _tmdbId, extras: false);
           _mediaTitle = d.title;
           _posterPath = d.posterPath;
           _backdropPath = d.backdropPath;

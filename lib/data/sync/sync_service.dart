@@ -67,6 +67,7 @@ class SyncService {
         'watchedEpisodes': p.watchedEpisodes,
         'title': p.title,
         'posterPath': p.posterPath,
+        'posterChecked': p.posterChecked,
         // Never send 0 — the server would treat it as the oldest possible write
         // and any real record would win, but a real timestamp keeps LWW honest.
         'updatedAt': p.updatedAt == 0
@@ -84,6 +85,7 @@ class SyncService {
         updatedAt: (d['updatedAt'] as num?)?.toInt() ?? 0,
         title: d['title'] as String?,
         posterPath: d['posterPath'] as String?,
+        posterChecked: (d['posterChecked'] as bool?) ?? false,
         completed: (d['completed'] as bool?) ?? false,
         watched: (d['watched'] as bool?) ?? false,
         watchedEpisodes: [

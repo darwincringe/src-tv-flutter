@@ -240,18 +240,20 @@ class TmdbApi {
       _list('search/multi', {'query': query});
 
   // Details
-  Future<MovieDetailsDto> movieDetails(int id) async {
+  Future<MovieDetailsDto> movieDetails(int id, {bool extras = true}) async {
     final resp = await _dio.get(
       'movie/$id',
-      queryParameters: {'append_to_response': 'credits,videos'},
+      queryParameters:
+          extras ? {'append_to_response': 'credits,videos'} : null,
     );
     return MovieDetailsDto.fromJson(resp.data as Map<String, dynamic>);
   }
 
-  Future<TvDetailsDto> tvDetails(int id) async {
+  Future<TvDetailsDto> tvDetails(int id, {bool extras = true}) async {
     final resp = await _dio.get(
       'tv/$id',
-      queryParameters: {'append_to_response': 'credits,videos'},
+      queryParameters:
+          extras ? {'append_to_response': 'credits,videos'} : null,
     );
     return TvDetailsDto.fromJson(resp.data as Map<String, dynamic>);
   }
