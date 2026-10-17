@@ -102,6 +102,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                         else
                           PagedPosterGrid(
                             itemCount: items.length,
+                            rows: 2,
                             posterPath: (i) => items[i].posterPath,
                             itemBuilder: (context, i, lead, focusNode) {
                               final it = items[i];
@@ -131,7 +132,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                           ContinueWatchingRow(
                             title: 'Continue Watching',
                             items: _continue,
-                            rows: 3,
+                            rows: 2,
                             autofocusFirst: items.isEmpty,
                             padding: EdgeInsets.zero,
                             onTap: (p) =>

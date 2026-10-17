@@ -157,6 +157,9 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
   int _start = 0;
   int? _pendingStart;
   bool _animating = false;
+  bool _portrait = false;
+  int? _alignedStart;
+  final ScrollController _scroller = ScrollController();
   bool _forward = true;
   FocusNode? _pendingFocus;
   final Map<String, Widget> _flying = {};
@@ -177,6 +180,7 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
   @override
   void dispose() {
     _slide.dispose();
+    _scroller.dispose();
     _beginFocus.dispose();
     _endFocus.dispose();
     _leadFocus.dispose();
@@ -208,12 +212,21 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
     _forward = forward;
     _pendingStart = next;
     _noteVisible(next, total, capacity);
-    _pendingFocus = forward && !nextPage.canForward
-        ? _beginFocus
-        : !forward && !nextPage.canBack
-            ? _leadNode
-            : (forward ? _endFocus : _beginFocus);
+    // Portrait keeps See more at the end of the scroll. Focusing it would
+    // pull that card back onto the first screen.
+    _pendingFocus = _portrait
+        ? null
+        : forward && !nextPage.canForward
+            ? _beginFocus
+            : !forward && !nextPage.canBack
+                ? _leadNode
+                : (forward ? _endFocus : _beginFocus);
     _flying.clear();
+    if (_portrait) {
+      setState(() => _start = next);
+      _pendingStart = null;
+      return;
+    }
     if (MediaQuery.disableAnimationsOf(context)) {
       setState(() => _start = next);
       _pendingStart = null;
@@ -265,9 +278,12 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
       builder: (context, constraints) {
         final width = constraints.maxWidth;
         if (width <= 0) return const SizedBox.shrink();
+        _portrait =
+            MediaQuery.orientationOf(context) == Orientation.portrait;
+        final total = widget.itemCount;
+        if (_portrait) return _portraitStrip(width, total);
         final cols = math.max(1, (width / (_extent + _gap)).ceil());
         final capacity = cols * widget.rows;
-        final total = widget.itemCount;
         _noteVisible(
           _animating ? (_pendingStart ?? _start) : _start,
           total,
@@ -299,6 +315,82 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
         );
       },
     );
+  }
+
+  /// Portrait keeps a fixed poster size and scrolls. See more is the last
+  /// cell, past the first screen, instead of a slot squeezed into the row.
+  Widget _portraitStrip(double width, int total) {
+    final viewportCols = math.max(1, (width / (_extent + _gap)).floor());
+    final pageCols = math.max(10, viewportCols + 3);
+    final capacity = pageCols * widget.rows;
+    _noteVisible(_start, total, capacity);
+    final page = posterWindow(start: _start, total: total, capacity: capacity);
+    final ids = <String>[];
+    if (page.canBack) ids.add('back');
+    for (var i = 0; i < page.shown; i++) {
+      ids.add('p${page.start + i}');
+    }
+    if (page.canForward) ids.add('forward');
+    if (ids.isEmpty) return const SizedBox.shrink();
+
+    const cardWidth = _extent;
+    final cardHeight = cardWidth * 3 / 2;
+    final rows = math.max(1, widget.rows);
+    Rect at(int slot) {
+      final col = slot ~/ rows;
+      final row = slot % rows;
+      return Rect.fromLTWH(
+        col * (cardWidth + _gap),
+        row * (cardHeight + _rowGap),
+        cardWidth,
+        cardHeight,
+      );
+    }
+
+    final placed = [
+      for (var i = 0; i < ids.length; i++)
+        _Slot(
+          id: ids[i],
+          rect: at(i),
+          child: _childForId(ids[i], page, total, capacity),
+        ),
+    ];
+    final contentWidth = placed.map((slot) => slot.rect.right).reduce(math.max);
+    final height = placed.map((slot) => slot.rect.bottom).reduce(math.max);
+    _alignPortraitOnce(page);
+    return SizedBox(
+      width: width,
+      height: height,
+      child: SingleChildScrollView(
+        controller: _scroller,
+        scrollDirection: Axis.horizontal,
+        clipBehavior: Clip.hardEdge,
+        child: SizedBox(
+          width: math.max(width, contentWidth),
+          height: height,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              for (final slot in placed)
+                Positioned.fromRect(rect: slot.rect, child: slot.child),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// After See more, start on the posters. The back card stays one swipe
+  /// to the left, and the forward card stays at the end of the scroll.
+  void _alignPortraitOnce(PosterWindow page) {
+    if (_alignedStart == page.start) return;
+    _alignedStart = page.start;
+    final target = page.canBack ? _extent + _gap : 0.0;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroller.hasClients) return;
+      final max = _scroller.position.maxScrollExtent;
+      _scroller.jumpTo(target.clamp(0.0, max));
+    });
   }
 
   List<_Slot> _placed(double width, int cols, int capacity, int total) {
@@ -561,8 +653,9 @@ class SeeMorePoster extends StatelessWidget {
   }
 }
 
-/// Continue Watching. Home uses one row; My Library keeps three. See more
-/// shifts five titles so the row never grows.
+/// Continue Watching. Home uses one row. My Library uses two, and on a
+/// phone those rows scroll with See more at the end. See more shifts five
+/// titles so the row never grows.
 class ContinueWatchingRow extends ConsumerStatefulWidget {
   const ContinueWatchingRow({
     super.key,

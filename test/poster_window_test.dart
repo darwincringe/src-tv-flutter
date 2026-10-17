@@ -136,6 +136,48 @@ void main() {
     expect(find.text('See more'), findsOneWidget);
   });
 
+  testWidgets('portrait scrolls the row and keeps see more at the end',
+      (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(390, 800);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 320,
+            child: PagedPosterGrid(
+              itemCount: 20,
+              rows: 1,
+              posterPath: _emptyPoster,
+              itemBuilder: _title,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('title-0'), findsOneWidget);
+    expect(tester.getTopLeft(find.text('title-0')).dx, lessThan(320));
+    expect(tester.getTopLeft(find.text('See more')).dx, greaterThan(320));
+
+    await tester.scrollUntilVisible(
+      find.text('See more'),
+      400,
+      scrollable: find.byType(Scrollable),
+    );
+    expect(tester.getTopLeft(find.text('See more')).dx, lessThan(320));
+
+    await tester.tap(find.text('See more'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('title-0'), findsNothing);
+    expect(find.text('title-5'), findsOneWidget);
+    expect(find.text('See more'), findsWidgets);
+  });
+
   testWidgets('a poster that stays slides into its new cell', (tester) async {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));

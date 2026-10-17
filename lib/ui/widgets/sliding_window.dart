@@ -154,7 +154,10 @@ class _SlidingWindowState extends State<SlidingWindow>
   bool? _pendingExpanded;
   bool _animating = false;
   bool _forward = true;
+  bool _narrowPortrait = false;
+  int? _alignedStart;
   FocusNode? _pendingFocus;
+  final ScrollController _scroller = ScrollController();
   final Map<String, Widget> _flying = {};
   late final AnimationController _slide;
   final FocusNode _beginFocus = FocusNode(debugLabel: 'window-see-more-begin');
@@ -170,6 +173,7 @@ class _SlidingWindowState extends State<SlidingWindow>
   @override
   void dispose() {
     _slide.dispose();
+    _scroller.dispose();
     _beginFocus.dispose();
     _endFocus.dispose();
     _leadFocus.dispose();
@@ -223,12 +227,23 @@ class _SlidingWindowState extends State<SlidingWindow>
     _forward = forward;
     _pendingStart = next;
     _pendingExpanded = widget.titleLimit == null ? null : nextExpanded;
-    _pendingFocus = forward && !nextPage.canForward
-        ? _beginFocus
-        : !forward && !nextPage.canBack
-            ? _leadNode
-            : (forward ? _endFocus : _beginFocus);
+    _pendingFocus = _narrowPortrait
+        ? null
+        : forward && !nextPage.canForward
+            ? _beginFocus
+            : !forward && !nextPage.canBack
+                ? _leadNode
+                : (forward ? _endFocus : _beginFocus);
     _flying.clear();
+    if (_narrowPortrait) {
+      setState(() {
+        _start = next;
+        if (widget.titleLimit != null) _expanded = nextExpanded;
+      });
+      _pendingStart = null;
+      _pendingExpanded = null;
+      return;
+    }
     if (MediaQuery.disableAnimationsOf(context)) {
       setState(() {
         _start = next;
@@ -270,6 +285,12 @@ class _SlidingWindowState extends State<SlidingWindow>
       builder: (context, constraints) {
         final width = constraints.maxWidth;
         if (width <= 0) return const SizedBox.shrink();
+        _narrowPortrait = !widget.vertical &&
+            width < 560 &&
+            MediaQuery.orientationOf(context) == Orientation.portrait;
+        if (_narrowPortrait) {
+          return _portraitStrip(width, _expanded);
+        }
         final cols = widget.vertical
             ? 1
             : (widget.columns ??
@@ -298,6 +319,83 @@ class _SlidingWindowState extends State<SlidingWindow>
           },
         );
       },
+    );
+  }
+
+  /// Phone portrait scrolls the page. See more stays the last cell.
+  Widget _portraitStrip(double width, bool expanded) {
+    final total = widget.itemCount;
+    final rows = math.max(1, widget.rows);
+    final cardWidth = math.min(280.0, math.max(180.0, width * 0.72));
+    final cardHeight = cardWidth / widget.cardAspect + widget.extraHeight;
+    final pageCols = math.max(4, (width / (cardWidth + widget.gap)).ceil() + 2);
+    final capacity = pageCols * rows;
+    final page = widget.titleLimit == null
+        ? posterWindow(start: _start, total: total, capacity: capacity)
+        : titleWindow(
+            start: _start,
+            total: total,
+            expanded: expanded,
+            initial: widget.initialTitles,
+            limit: widget.titleLimit!,
+          );
+    final ids = <String>[];
+    if (page.canBack) ids.add('back');
+    for (var i = 0; i < page.shown; i++) {
+      ids.add('p${page.start + i}');
+    }
+    if (page.canForward) ids.add('forward');
+    if (ids.isEmpty) return const SizedBox.shrink();
+
+    Rect at(int slot) {
+      final col = slot ~/ rows;
+      final row = slot % rows;
+      return Rect.fromLTWH(
+        col * (cardWidth + widget.gap),
+        row * (cardHeight + widget.gap),
+        cardWidth,
+        cardHeight,
+      );
+    }
+
+    final placed = [
+      for (var i = 0; i < ids.length; i++)
+        _Slot(
+          id: ids[i],
+          rect: at(i),
+          child: _childForId(ids[i], page, total, capacity),
+        ),
+    ];
+    final contentWidth = placed.map((slot) => slot.rect.right).reduce(math.max);
+    final height = placed.map((slot) => slot.rect.bottom).reduce(math.max);
+    if (_alignedStart != _start) {
+      _alignedStart = _start;
+      final target = page.canBack ? cardWidth + widget.gap : 0.0;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_scroller.hasClients) return;
+        final max = _scroller.position.maxScrollExtent;
+        _scroller.jumpTo(target.clamp(0.0, max));
+      });
+    }
+    return SizedBox(
+      width: width,
+      height: height,
+      child: SingleChildScrollView(
+        controller: _scroller,
+        scrollDirection: Axis.horizontal,
+        clipBehavior: Clip.hardEdge,
+        child: SizedBox(
+          width: math.max(width, contentWidth),
+          height: height,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              for (final slot in placed)
+                Positioned.fromRect(rect: slot.rect, child: slot.child),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
