@@ -18,6 +18,8 @@ class HelperRequest {
     this.keywordQueries = const [],
     this.withoutGenres,
     this.minRating,
+    this.personName,
+    this.personRole,
   });
 
   /// Short line shown above the results, e.g. "Disturbing movies".
@@ -52,6 +54,13 @@ class HelperRequest {
   /// Minimum TMDB rating, so a broad genre stays a list people want.
   final double? minRating;
 
+  /// "bruce willis movies" — a person's name, not a theme keyword.
+  final String? personName;
+
+  /// `cast` or `crew` when the phrase says starring or directed. Null lets
+  /// the person's own department decide.
+  final String? personRole;
+
   bool get isLike => likeTitle != null && likeTitle!.isNotEmpty;
 
   /// What the filters understood, shown under the results.
@@ -74,6 +83,7 @@ class HelperRequest {
       if (yearFrom != null && yearTo != null) '$yearFrom–$yearTo',
       ?genreWord,
       ?mood,
+      if (personName != null) _nameCase(personName!),
     ];
     if (bits.isEmpty) return kind;
     return '$kind · ${bits.join(' · ')}';
@@ -107,6 +117,32 @@ String? pickKeywordIds(String query, List<TmdbKeyword> found) {
         }).toList();
   if (pool.isEmpty) return null;
   return pool.take(2).map((k) => k.id).join('|');
+}
+
+class HelperPerson {
+  const HelperPerson(this.id, this.name, this.department, this.popularity);
+
+  final int id;
+  final String name;
+  final String department;
+  final double popularity;
+}
+
+/// The person whose name is the phrase, preferring the best-known match.
+HelperPerson? pickPerson(String query, List<HelperPerson> found) {
+  final q = _keywordKey(query);
+  if (q.isEmpty || found.isEmpty) return null;
+  final exact = found.where((p) => _keywordKey(p.name) == q).toList();
+  if (exact.isEmpty) return null;
+  exact.sort((a, b) => b.popularity.compareTo(a.popularity));
+  return exact.first;
+}
+
+/// Cast for an actor, crew for a director, unless the phrase already said which.
+String personCredit(String? role, String department) {
+  if (role == 'cast' || role == 'crew') return role!;
+  if (department.toLowerCase() == 'directing') return 'crew';
+  return 'cast';
 }
 
 HelperRequest? parseHelperQuery(String raw) {
@@ -158,9 +194,19 @@ HelperRequest? parseHelperQuery(String raw) {
   List<String> keywordQueries = const [];
   String? withoutGenres;
   double? minRating;
+  String? personRole;
   final mood = <String>[];
 
   for (final token in tokens) {
+    if (token == 'with' || token == 'starring' || token == 'featuring') {
+      personRole = 'cast';
+      continue;
+    }
+    if (token == 'directed' || token == 'director') {
+      personRole = 'crew';
+      continue;
+    }
+    if (token == 'by') continue;
     if (_filler.contains(token)) continue;
     if (_movieWords.contains(token)) {
       movies = true;
@@ -207,8 +253,12 @@ HelperRequest? parseHelperQuery(String raw) {
     series = true;
   }
 
-  final moodText = mood.isEmpty ? null : mood.join(' ');
-  if (moodText == null &&
+  final loose = mood.join(' ');
+  final asPerson = personRole != null ? mood.isNotEmpty : mood.length >= 2;
+  final personName = asPerson ? loose : null;
+  final moodText = asPerson || mood.isEmpty ? null : loose;
+  if (personName == null &&
+      moodText == null &&
       genreWord == null &&
       language == null &&
       yearFrom == null) {
@@ -230,6 +280,8 @@ HelperRequest? parseHelperQuery(String raw) {
     keywordQueries: keywordQueries,
     withoutGenres: withoutGenres,
     minRating: minRating,
+    personName: personName,
+    personRole: personName == null ? null : personRole,
   );
 }
 
@@ -237,6 +289,11 @@ String _titleCase(String s) {
   if (s.isEmpty) return s;
   return s[0].toUpperCase() + s.substring(1);
 }
+
+String _nameCase(String s) => s
+    .split(' ')
+    .map((w) => w.isEmpty ? w : w[0].toUpperCase() + w.substring(1))
+    .join(' ');
 
 (int, int)? _decade(String token) {
   final m = RegExp(r'^((?:19|20)\d{2}|[2-9]0)s$').firstMatch(token);

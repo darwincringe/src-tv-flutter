@@ -40,6 +40,26 @@ void main() {
     expect(feed.hasMore, isFalse);
     expect(api.discoverCalls, 3);
   });
+
+  test('a person query uses their films', () async {
+    final actor = _PersonApi(
+      people: [(id: 62, name: 'Bruce Willis', department: 'Acting', popularity: 50)],
+    );
+    final repo = MediaRepository(api: actor);
+    final feed = await repo.findByDescription('bruce willis movies');
+    expect(actor.personQuery, 'bruce willis');
+    expect(actor.lastPersonId, 62);
+    expect(actor.lastRole, 'cast');
+    expect(actor.keywordCalls, 0);
+    expect(feed.items.single.id, 1);
+
+    final director = _PersonApi(
+      people: [(id: 525, name: 'Christopher Nolan', department: 'Directing', popularity: 40)],
+    );
+    await MediaRepository(api: director).findByDescription('christopher nolan movies');
+    expect(director.lastPersonId, 525);
+    expect(director.lastRole, 'crew');
+  });
 }
 
 List<MediaItem> _posters(int start, int count) => [
@@ -50,6 +70,54 @@ List<MediaItem> _posters(int start, int count) => [
           posterPath: '/p${start + i}.jpg',
         ),
     ];
+
+class _PersonApi extends TmdbApi {
+  _PersonApi({required this.people}) : super(Dio());
+
+  final List<({int id, String name, String department, double popularity})> people;
+  String? personQuery;
+  int? lastPersonId;
+  String? lastRole;
+  int keywordCalls = 0;
+
+  @override
+  Future<List<({int id, String name, String department, double popularity})>>
+      searchPeople(String query) async {
+    personQuery = query;
+    return people;
+  }
+
+  @override
+  Future<List<({int id, String name})>> searchKeywords(String query) async {
+    keywordCalls++;
+    return const [];
+  }
+
+  @override
+  Future<TmdbListPage> discoverFiltered(
+    String type, {
+    String? genres,
+    String? keywords,
+    String? language,
+    int? yearFrom,
+    int? yearTo,
+    int page = 1,
+    String? withoutGenres,
+    double? minRating,
+    int? personId,
+    String? personRole,
+  }) async {
+    lastPersonId = personId;
+    lastRole = personRole;
+    return TmdbListPage(
+      items: [
+        const MediaItem(id: 1, title: 'Die Hard', posterPath: '/p.jpg'),
+      ],
+      page: 1,
+      totalPages: 1,
+    );
+  }
+}
 
 class _PagedApi extends TmdbApi {
   _PagedApi(this.pages) : super(Dio());
@@ -73,6 +141,8 @@ class _PagedApi extends TmdbApi {
     int page = 1,
     String? withoutGenres,
     double? minRating,
+    int? personId,
+    String? personRole,
   }) async {
     discoverCalls++;
     final items = page <= pages.length ? pages[page - 1] : const <MediaItem>[];

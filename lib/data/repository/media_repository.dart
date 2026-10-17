@@ -502,6 +502,8 @@ class _HelperSession {
   String? _seedType;
   int _likePage = 0;
   bool _likeDone = false;
+  int? _personId;
+  String? _personAs;
 
   bool get _sourcesDone => request.isLike ? _likeDone : _movieDone && _tvDone;
 
@@ -548,7 +550,24 @@ class _HelperSession {
       _seedId = first.id;
       return;
     }
-    _moodIds = await _moodKeywordIds();
+    if (request.personName != null) {
+      final found = await _repo._api.searchPeople(request.personName!);
+      final person = pickPerson(
+        request.personName!,
+        [
+          for (final p in found)
+            HelperPerson(p.id, p.name, p.department, p.popularity),
+        ],
+      );
+      if (person != null) {
+        _personId = person.id;
+        _personAs = personCredit(request.personRole, person.department);
+      } else {
+        _moodIds = await _repo._keywordIds(request.personName);
+      }
+    } else {
+      _moodIds = await _moodKeywordIds();
+    }
     final needsGenreKeyword = request.keywordQueries.isEmpty &&
         ((request.movies && request.movieGenreId == null) ||
             (request.series && request.tvGenreId == null));
@@ -573,6 +592,7 @@ class _HelperSession {
   }
 
   bool _canQuery(String? genreId) {
+    if (_personId != null) return true;
     final keywords = genreId == null
         ? _repo._joinKeywords(_moodIds, _genreKeywordIds)
         : _moodIds;
@@ -620,6 +640,8 @@ class _HelperSession {
       page: pageNumber,
       withoutGenres: request.withoutGenres,
       minRating: request.minRating,
+      personId: _personId,
+      personRole: _personAs,
     );
     final buf = movies ? _movieBuf : _tvBuf;
     buf.addAll(_accept(page.items, type));

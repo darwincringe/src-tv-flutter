@@ -78,6 +78,41 @@ void main() {
     expect(q.explained, 'Similar movies');
   });
 
+  test('a person name is their films, not a theme', () {
+    final q = parseHelperQuery('bruce willis movies')!;
+    expect(q.personName, 'bruce willis');
+    expect(q.personRole, isNull);
+    expect(q.mood, isNull);
+    expect(q.movies, isTrue);
+    expect(q.series, isFalse);
+    expect(q.explained, 'Movies · Bruce Willis');
+  });
+
+  test('starring and directed by set the credit', () {
+    expect(parseHelperQuery('movies with tom hanks')!.personRole, 'cast');
+    expect(
+      parseHelperQuery('movies directed by christopher nolan')!.personRole,
+      'crew',
+    );
+    expect(
+      parseHelperQuery('christopher nolan movies')!.personName,
+      'christopher nolan',
+    );
+  });
+
+  test('person picker keeps an exact name', () {
+    const found = [
+      HelperPerson(1, 'Bruce Willis Reynolds', 'Acting', 1),
+      HelperPerson(62, 'Bruce Willis', 'Acting', 40),
+      HelperPerson(9, 'Bruce Willis', 'Acting', 10),
+    ];
+    expect(pickPerson('bruce willis', found)!.id, 62);
+    expect(pickPerson('die hard', found), isNull);
+    expect(personCredit(null, 'Directing'), 'crew');
+    expect(personCredit(null, 'Acting'), 'cast');
+    expect(personCredit('cast', 'Directing'), 'cast');
+  });
+
   test('a bare word is not a list', () {
     expect(parseHelperQuery('movies'), isNull);
     expect(parseHelperQuery(''), isNull);

@@ -87,6 +87,8 @@ class TmdbApi {
     int page = 1,
     String? withoutGenres,
     double? minRating,
+    int? personId,
+    String? personRole,
   }) {
     final params = <String, dynamic>{
       'sort_by': 'popularity.desc',
@@ -101,6 +103,14 @@ class TmdbApi {
     if (minRating != null) params['vote_average.gte'] = minRating;
     if (keywords != null && keywords.isNotEmpty) {
       params['with_keywords'] = keywords;
+    }
+    if (personId != null) {
+      final key = type == 'tv'
+          ? 'with_people'
+          : personRole == 'crew'
+              ? 'with_crew'
+              : 'with_cast';
+      params[key] = personId;
     }
     if (language != null && language.isNotEmpty) {
       params['with_original_language'] = language;
@@ -159,6 +169,26 @@ class TmdbApi {
       if (out.length == 12) break;
     }
     return out;
+  }
+
+  Future<List<({int id, String name, String department, double popularity})>>
+      searchPeople(String query) async {
+    final resp = await _dio.get(
+      'search/person',
+      queryParameters: {'query': query},
+    );
+    final data = resp.data as Map<String, dynamic>;
+    final results = (data['results'] as List?) ?? const [];
+    return [
+      for (final raw in results)
+        if (raw is Map)
+          (
+            id: (raw['id'] as num).toInt(),
+            name: (raw['name'] as String?) ?? '',
+            department: (raw['known_for_department'] as String?) ?? '',
+            popularity: (raw['popularity'] as num?)?.toDouble() ?? 0,
+          ),
+    ];
   }
 
   Future<List<({int id, String name})>> searchKeywords(String query) async {
