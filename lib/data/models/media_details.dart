@@ -24,8 +24,8 @@ class MediaDetails {
   /// Full release / first-air date ("2026-08-01").
   final String? releaseDate;
 
-  /// "Coming Soon" tag: for movies, true when TMDB lists no watch providers in
-  /// our region; for TV, true when the series' first-air date is in the future.
+  /// "Coming Soon" for a movie means it is in theaters (or about to be) and
+  /// not on a streaming service yet. For TV, the series has not premiered.
   /// Purely informational — Play stays enabled.
   final bool comingSoon;
 

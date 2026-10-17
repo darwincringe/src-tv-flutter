@@ -73,9 +73,12 @@ class MediaItem {
     return fallback;
   }
 
-  /// Whether to badge this as "Coming Soon". Movies: upcoming or released
-  /// within the last 30 days. TV: first air date still in the future.
+  /// Whether to badge this as "Coming Soon" before details load. Movies only
+  /// when the release date is still in the future — a title that already
+  /// opened, including one that launched on Netflix, is not badged here.
+  /// The details page then keeps the badge only for a theatrical run that is
+  /// not streaming yet. TV: first air date still in the future.
   bool get comingSoon => resolvedType('movie') == 'tv'
       ? isComingSoon(firstAirDate)
-      : isComingSoonRelease(releaseDate);
+      : isComingSoon(releaseDate);
 }

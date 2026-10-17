@@ -13,6 +13,7 @@ import '../store/recommendation_seeds.dart';
 import '../store/watch_progress.dart';
 import '../stream/extract_response.dart';
 import '../stream/stream_client.dart';
+import '../tmdb/coming_soon.dart';
 import '../tmdb/tmdb_api.dart';
 
 /// Single source of truth for catalog data, mirroring the Kotlin
@@ -240,8 +241,7 @@ class MediaRepository {
       d = _tvToDetails(dto, comingSoon: isComingSoon(dto.firstAirDate));
     } else {
       final dto = await _api.movieDetails(id);
-      // "Coming Soon" for movies = upcoming or released within the last 30 days.
-      d = _movieToDetails(dto, comingSoon: isComingSoonRelease(dto.releaseDate));
+      d = _movieToDetails(dto, comingSoon: await _movieComingSoon(id));
     }
     _detailsCache[key] = d;
     return d;
@@ -254,6 +254,23 @@ class MediaRepository {
     final eps = (await _api.seasonDetails(id, season)).episodes;
     _episodeCache[key] = eps;
     return eps;
+  }
+
+  /// Cinema titles that are not on a streaming service yet. A movie already
+  /// online (Netflix or any other offer) is not Coming Soon.
+  Future<bool> _movieComingSoon(int id) async {
+    try {
+      final lookedUp = await Future.wait([
+        _api.movieWatchProviders(id),
+        _api.movieReleaseDates(id),
+      ]);
+      return movieComingSoon(
+        availableOnline: movieAvailableOnline(lookedUp[0]),
+        theatricalDates: theatricalReleaseDates(lookedUp[1]),
+      );
+    } catch (_) {
+      return false;
+    }
   }
 
   MediaDetails _movieToDetails(MovieDetailsDto dto, {bool comingSoon = false}) =>

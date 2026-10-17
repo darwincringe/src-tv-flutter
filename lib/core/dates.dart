@@ -23,14 +23,3 @@ bool isComingSoon(String? iso) {
   return d.isAfter(today);
 }
 
-/// Whether a movie release date [iso] is upcoming or released within the last
-/// 30 days — i.e. brand-new or not out yet, so likely not on streaming — and so
-/// tagged "Coming Soon". A title more than 30 days past release is not tagged.
-bool isComingSoonRelease(String? iso) {
-  if (iso == null || iso.isEmpty) return false;
-  final d = DateTime.tryParse(iso);
-  if (d == null) return false;
-  final now = DateTime.now();
-  final today = DateTime(now.year, now.month, now.day);
-  return d.add(const Duration(days: 30)).isAfter(today);
-}

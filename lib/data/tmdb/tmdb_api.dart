@@ -231,8 +231,20 @@ class TmdbApi {
     return SeasonDetailsDto.fromJson(resp.data as Map<String, dynamic>);
   }
 
+  /// Watch-provider payload for [id] (`results` keyed by country).
+  Future<Object?> movieWatchProviders(int id) async {
+    final resp = await _dio.get('movie/$id/watch/providers');
+    return resp.data;
+  }
+
+  /// Release-date payload for [id], including theatrical vs digital types.
+  Future<Object?> movieReleaseDates(int id) async {
+    final resp = await _dio.get('movie/$id/release_dates');
+    return resp.data;
+  }
+
   /// Whether the movie has any watch provider (stream/rent/buy/free/ads) in
-  /// [region]. When false we tag the title "Coming Soon".
+  /// [region].
   Future<bool> movieHasProviders(int id, String region) async {
     final resp = await _dio.get('movie/$id/watch/providers');
     final data = resp.data;
