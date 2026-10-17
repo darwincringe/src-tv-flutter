@@ -12,6 +12,7 @@ import '../../data/repository/media_repository.dart';
 import '../../data/store/recommendation_seeds.dart';
 import '../../data/tmdb/image_urls.dart';
 import '../widgets/coming_soon_badge.dart';
+import '../widgets/watched_check.dart';
 
 enum _Status { idle, loading, empty, error, results }
 
@@ -224,19 +225,31 @@ class _SuggestionRow extends StatelessWidget {
         padding: const EdgeInsets.all(8),
         child: Row(
           children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: SizedBox(
-                width: 40,
-                height: 58,
-                child: url != null
-                    ? CachedNetworkImage(
-                        imageUrl: url,
-                        fit: BoxFit.cover,
-                        memCacheWidth:
-                            (40 * MediaQuery.devicePixelRatioOf(context)).round(),
-                      )
-                    : Container(color: AppColors.charcoal),
+            SizedBox(
+              width: 40,
+              height: 58,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: url != null
+                        ? CachedNetworkImage(
+                            imageUrl: url,
+                            fit: BoxFit.cover,
+                            memCacheWidth: (40 *
+                                    MediaQuery.devicePixelRatioOf(context))
+                                .round(),
+                          )
+                        : Container(color: AppColors.charcoal),
+                  ),
+                  if (type == 'movie')
+                    Positioned(
+                      top: 3,
+                      right: 3,
+                      child: MovieWatchedBadge(tmdbId: item.id, size: 14),
+                    ),
+                ],
               ),
             ),
             const SizedBox(width: 12),

@@ -102,6 +102,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   int _subLoadToken = 0; // guards against a stale async load winning
   int _resumeTargetMs = 0;
   bool _resumeDone = true;
+  bool _notedWatched = false;
   int _resumeSeekAtMs = 0; // when the resume seek was issued (reveal fallback)
   int _retryCount = 0;
 
@@ -799,6 +800,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   void _playEpisode(_EpisodeRef ref) {
+    _noteWatchedMilestone(_position.inMilliseconds, _duration.inMilliseconds);
+    _notedWatched = false;
     // Pause the current episode straight away so it doesn't keep playing (audio
     // + video) behind the loading spinner while the next one is resolved.
     _controller?.pause();
@@ -836,6 +839,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   void _seekToMs(int ms) {
+    _noteWatchedMilestone(ms, _duration.inMilliseconds);
     _controller?.seekTo(Duration(milliseconds: ms));
     _controller?.play();
     _restartHideTimer();
@@ -925,6 +929,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       final sub = _currentSubtitleText();
       final subChanged = sub != _subtitleText;
       if (subChanged) _subtitleText = sub;
+      _noteWatchedMilestone(_position.inMilliseconds, _duration.inMilliseconds);
       _ticks++;
       if (_ticks % 60 == 0) _saveProgress(); // every 30s
       if (mounted && (_showControls || subChanged || actionChanged)) {
@@ -997,6 +1002,17 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     return null;
   }
 
+  void _noteWatchedMilestone(int positionMs, int durationMs) {
+    if (_notedWatched || !_resumeDone || _mode != PlayerMode.stream) return;
+    if (!reachedWatchedThreshold(positionMs, durationMs)) return;
+    _notedWatched = true;
+    if (_isTv && _season != null && _episode != null) {
+      WatchProgressStore.rememberEpisode(_type, _tmdbId, _season!, _episode!);
+    } else if (!_isTv) {
+      WatchProgressStore.rememberMovie(_type, _tmdbId);
+    }
+  }
+
   void _saveProgress() {
     if (_mode != PlayerMode.stream) return;
     if (!_resumeDone) return;
@@ -1032,7 +1048,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         title: _mediaTitle,
         posterPath: _posterPath,
         completed: false,
-      ));
+      ), finishedSeason: _season, finishedEpisode: _episode);
     } else {
       final dur = _duration.inMilliseconds;
       WatchProgressStore.save(WatchProgress(
@@ -1071,6 +1087,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     var target = _position.inMilliseconds + deltaMs;
     if (target < 0) target = 0;
     if (dur > 0 && target > dur) target = dur;
+    _noteWatchedMilestone(target, dur);
     _controller?.seekTo(Duration(milliseconds: target));
     _controller?.play(); // avoid post-seek stall
   }
@@ -1108,6 +1125,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   // play/pause so the user presses play to resume.
   void _commitScrub() {
     _markTimelineSeek();
+    _noteWatchedMilestone(_scrubPreviewMs, _duration.inMilliseconds);
     _controller?.seekTo(Duration(milliseconds: _scrubPreviewMs));
     setState(() => _scrubbing = false);
     _playPauseFocus.requestFocus();
@@ -1139,6 +1157,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   void _touchScrubEnd() {
     _markTimelineSeek();
+    _noteWatchedMilestone(_scrubPreviewMs, _duration.inMilliseconds);
     _controller?.seekTo(Duration(milliseconds: _scrubPreviewMs));
     if (_wasPlayingBeforeScrub) _controller?.play();
     setState(() => _scrubbing = false);
@@ -1730,6 +1749,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                       onTouchScrubEnd: _touchScrubEnd,
                       onSeekTo: (p) {
                         _markTimelineSeek();
+                        _noteWatchedMilestone(
+                          p.inMilliseconds,
+                          _duration.inMilliseconds,
+                        );
                         _controller?.seekTo(p);
                         _controller?.play();
                         _restartHideTimer();

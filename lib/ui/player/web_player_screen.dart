@@ -156,6 +156,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
 
   int _resumeTargetMs = 0;
   bool _resumeDone = true;
+  bool _notedWatched = false;
   bool _metadataSeekDone = false;
 
   // Series / episode nav.
@@ -447,6 +448,8 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   void _playEpisode(_EpisodeRef ref) {
+    _noteWatchedMilestone(_positionMs, _durationMs);
+    _notedWatched = false;
     _saveProgress();
     _video.pause();
     _subToken++; // cancel any in-flight subtitle load
@@ -532,6 +535,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
         }
       } catch (_) {}
 
+      _noteWatchedMilestone(_positionMs, _durationMs);
       _ticks++;
       if (_ticks % 60 == 0) _saveProgress(); // ~30s
 
@@ -588,6 +592,20 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   // ---- progress ----------------------------------------------------------
+  void _noteWatchedMilestone(int positionMs, int durationMs) {
+    if (_notedWatched || !_resumeDone || _a.mode != PlayerMode.stream) return;
+    if (!reachedWatchedThreshold(positionMs, durationMs)) return;
+    _notedWatched = true;
+    final id = _a.tmdbId;
+    final type = _a.type;
+    if (id == null || type == null) return;
+    if (_isTv && _season != null && _episode != null) {
+      WatchProgressStore.rememberEpisode(type, id, _season!, _episode!);
+    } else if (!_isTv) {
+      WatchProgressStore.rememberMovie(type, id);
+    }
+  }
+
   void _saveProgress() {
     if (_a.mode != PlayerMode.stream || !_resumeDone) return;
     final dur = _durationMs;
@@ -624,7 +642,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
         title: _title,
         posterPath: _a.backdropPath,
         completed: false,
-      ));
+      ), finishedSeason: _season, finishedEpisode: _episode);
     } else {
       final dur = _durationMs;
       if (dur <= 0) return;
@@ -1264,7 +1282,8 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
 
   void _seekToMs(int ms) {
     final dur = _durationMs;
-    final clamped = ms.clamp(0, dur > 0 ? dur : ms);
+    final clamped = ms.clamp(0, dur > 0 ? dur : ms).round();
+    _noteWatchedMilestone(clamped, dur);
     _video.currentTime = clamped / 1000.0;
     setState(() => _positionMs = clamped);
     _restartHideTimer();

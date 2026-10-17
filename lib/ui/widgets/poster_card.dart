@@ -6,6 +6,7 @@ import '../../core/theme.dart';
 import '../../data/models/media_item.dart';
 import '../../data/tmdb/image_urls.dart';
 import 'coming_soon_badge.dart';
+import 'watched_check.dart';
 
 /// A 2:3 poster tile used across the category rows. Focus scales it up and
 /// draws a white border (matching the Kotlin `PosterCard`).
@@ -19,6 +20,7 @@ class PosterCard extends StatelessWidget {
     this.focusNode,
     this.width = 114,
     this.ensureVisibleOnFocus = false,
+    this.watchedType,
   });
 
   final MediaItem item;
@@ -28,6 +30,16 @@ class PosterCard extends StatelessWidget {
   final FocusNode? focusNode;
   final double width;
   final bool ensureVisibleOnFocus;
+
+  /// Used when the item itself has no media type, such as a movie-only row.
+  final String? watchedType;
+
+  bool get _showMovieWatched {
+    final type = (item.mediaType == 'movie' || item.mediaType == 'tv')
+        ? item.mediaType
+        : watchedType;
+    return type == 'movie';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -52,6 +64,16 @@ class PosterCard extends StatelessWidget {
                 displayWidth: width,
               ),
               if (item.comingSoon) const PosterComingSoonBadge(),
+              if (_showMovieWatched)
+                Positioned(
+                  top: 6,
+                  left: item.comingSoon ? 6.0 : null,
+                  right: item.comingSoon ? null : 6.0,
+                  child: MovieWatchedBadge(
+                    tmdbId: item.id,
+                    size: width >= 100 ? 22 : 16,
+                  ),
+                ),
             ],
           ),
         ),

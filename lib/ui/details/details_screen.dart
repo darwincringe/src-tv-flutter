@@ -16,7 +16,9 @@ import '../../data/store/watch_progress.dart';
 import '../../data/tmdb/image_urls.dart';
 import '../player/player_args.dart';
 import '../widgets/coming_soon_badge.dart';
+import '../widgets/sliding_window.dart';
 import '../widgets/state_views.dart';
+import '../widgets/watched_check.dart';
 
 class DetailsScreen extends ConsumerStatefulWidget {
   const DetailsScreen({super.key, required this.mediaType, required this.id});
@@ -117,7 +119,7 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
     try {
       final repo = ref.read(mediaRepositoryProvider);
       final d = await repo.details(widget.mediaType, widget.id);
-      final sim = (await repo.similar(widget.mediaType, widget.id)).take(12).toList();
+      final sim = await repo.similar(widget.mediaType, widget.id);
       List<String> gallery = const [];
       try {
         gallery = await repo.gallery(widget.mediaType, widget.id);
@@ -141,32 +143,10 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
     }
   }
 
-  static const int _episodePageSize = 10;
-  int _episodeWindowStart = 0;
-
-  void _showMoreEpisodes() {
-    final maxStart = _episodes.length - _episodePageSize;
-    setState(() => _episodeWindowStart =
-        (_episodeWindowStart + _episodePageSize).clamp(0, maxStart).toInt());
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _firstEpisodeFocus.requestFocus();
-    });
-  }
-
-  void _showPrevEpisodes() {
-    final maxStart = _episodes.length - _episodePageSize;
-    setState(() => _episodeWindowStart =
-        (_episodeWindowStart - _episodePageSize).clamp(0, maxStart).toInt());
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _firstEpisodeFocus.requestFocus();
-    });
-  }
-
   Future<void> _loadEpisodes(int season) async {
     setState(() {
       _episodesLoading = true;
       _episodes = [];
-      _episodeWindowStart = 0;
     });
     try {
       final eps = await ref.read(mediaRepositoryProvider).episodes(widget.id, season);
@@ -289,15 +269,28 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              d.title,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: AppColors.textPrimary,
-                fontSize: 30,
-                fontWeight: FontWeight.bold,
-              ),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Flexible(
+                  child: Text(
+                    d.title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: AppColors.textPrimary,
+                      fontSize: 30,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                if (!d.isTv)
+                  MovieWatchedBadge(
+                    tmdbId: d.id,
+                    size: 28,
+                    margin: const EdgeInsets.only(left: 10),
+                  ),
+              ],
             ),
             if (d.tagline != null) ...[
               const SizedBox(height: 6),
@@ -484,43 +477,39 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
                 style: TextStyle(color: AppColors.textSecondary),
               ),
             )
-          else ...[
-            if (_episodeWindowStart > 0)
-              _EpisodeNavButton(
-                label: 'See Previous Episodes',
-                icon: Icons.expand_less,
-                onTap: _showPrevEpisodes,
-              ),
-            // Only render a window of episodes at a time — long series (e.g.
-            // Doraemon, hundreds of episodes) would otherwise build every row
-            // and lag badly.
-            ...() {
-              final end = (_episodeWindowStart + _episodePageSize)
-                  .clamp(0, _episodes.length)
-                  .toInt();
-              return [
-                for (var i = _episodeWindowStart; i < end; i++)
-                  _EpisodeRow(
-                    episode: _episodes[i],
-                    focusNode: i == _episodeWindowStart ? _firstEpisodeFocus : null,
+          else
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 40),
+              child: SlidingWindow(
+                key: ValueKey(_selectedSeason),
+                vertical: true,
+                rows: 6,
+                step: 5,
+                gap: 12,
+                rowExtent: 116,
+                itemCount: _episodes.length,
+                firstItemFocusNode: _firstEpisodeFocus,
+                imageUrl: (i) => stillUrl(_episodes[i].stillPath),
+                itemBuilder: (context, i, lead, focusNode) {
+                  final ep = _episodes[i];
+                  return _EpisodeRow(
+                    tmdbId: d.id,
+                    season: _selectedSeason,
+                    episode: ep,
+                    flush: true,
+                    focusNode: focusNode,
                     onTap: () => playStream(
                       context,
                       tmdbId: d.id,
                       type: 'tv',
                       season: _selectedSeason,
-                      episode: _episodes[i].episodeNumber,
+                      episode: ep.episodeNumber,
                       backdropPath: d.backdropPath,
                     ),
-                  ),
-              ];
-            }(),
-            if (_episodeWindowStart + _episodePageSize < _episodes.length)
-              _EpisodeNavButton(
-                label: 'See More Episodes',
-                icon: Icons.expand_more,
-                onTap: _showMoreEpisodes,
+                  );
+                },
               ),
-          ],
+            ),
         ],
       ),
     );
@@ -564,33 +553,6 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
   // ---- More like this ----------------------------------------------------
 
   Widget _moreLikeThis(bool portrait) {
-    final columns = portrait ? 2 : 3;
-    final rows = <Widget>[];
-    for (var i = 0; i < _similar.length; i += columns) {
-      final chunk = _similar.skip(i).take(columns).toList();
-      rows.add(Padding(
-        padding: const EdgeInsets.only(bottom: 16),
-        child: Row(
-          children: [
-            for (var c = 0; c < columns; c++) ...[
-              if (c > 0) const SizedBox(width: 16),
-              Expanded(
-                child: c < chunk.length
-                    ? _SimilarCard(
-                        item: chunk[c],
-                        onTap: () => openDetails(
-                          context,
-                          chunk[c].resolvedType(widget.mediaType),
-                          chunk[c].id,
-                        ),
-                      )
-                    : const SizedBox.shrink(),
-              ),
-            ],
-          ],
-        ),
-      ));
-    }
     return Padding(
       padding: const EdgeInsets.fromLTRB(40, 24, 40, 0),
       child: Column(
@@ -607,7 +569,28 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
               ),
             ),
           ),
-          ...rows,
+          SlidingWindow(
+            itemCount: _similar.length,
+            columns: portrait ? 2 : 3,
+            rows: 2,
+            step: 5,
+            gap: 16,
+            cardAspect: 16 / 9,
+            extraHeight: 120,
+            imageUrl: (i) => cardBackdropUrl(_similar[i].backdropPath),
+            itemBuilder: (context, i, lead, focusNode) {
+              final item = _similar[i];
+              return _SimilarCard(
+                item: item,
+                focusNode: focusNode,
+                onTap: () => openDetails(
+                  context,
+                  item.resolvedType(widget.mediaType),
+                  item.id,
+                ),
+              );
+            },
+          ),
         ],
       ),
     );
@@ -907,10 +890,20 @@ class _SeasonPillState extends State<_SeasonPill> {
 }
 
 class _EpisodeRow extends StatelessWidget {
-  const _EpisodeRow({required this.episode, required this.onTap, this.focusNode});
+  const _EpisodeRow({
+    required this.tmdbId,
+    required this.season,
+    required this.episode,
+    required this.onTap,
+    this.focusNode,
+    this.flush = false,
+  });
+  final int tmdbId;
+  final int season;
   final Episode episode;
   final VoidCallback onTap;
   final FocusNode? focusNode;
+  final bool flush;
 
   @override
   Widget build(BuildContext context) {
@@ -922,7 +915,7 @@ class _EpisodeRow extends StatelessWidget {
       meta.add(formatDate(episode.airDate));
     }
     return Padding(
-      padding: const EdgeInsets.fromLTRB(40, 0, 40, 12),
+      padding: flush ? EdgeInsets.zero : const EdgeInsets.fromLTRB(40, 0, 40, 12),
       child: FocusableCard(
         onTap: onTap,
         focusNode: focusNode,
@@ -935,19 +928,35 @@ class _EpisodeRow extends StatelessWidget {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(4),
-                child: SizedBox(
-                  width: 150,
-                  height: 84,
-                  child: still != null
-                      ? CachedNetworkImage(
-                          imageUrl: still,
-                          fit: BoxFit.cover,
-                          memCacheWidth:
-                              (150 * MediaQuery.devicePixelRatioOf(context)).round(),
-                        )
-                      : Container(color: AppColors.charcoal),
+              SizedBox(
+                width: 150,
+                height: 84,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: still != null
+                          ? CachedNetworkImage(
+                              imageUrl: still,
+                              fit: BoxFit.cover,
+                              memCacheWidth: (150 *
+                                      MediaQuery.devicePixelRatioOf(context))
+                                  .round(),
+                            )
+                          : Container(color: AppColors.charcoal),
+                    ),
+                    Positioned(
+                      top: 6,
+                      right: 6,
+                      child: EpisodeWatchedBadge(
+                        tmdbId: tmdbId,
+                        season: season,
+                        episode: episode.episodeNumber,
+                        size: 26,
+                      ),
+                    ),
+                  ],
                 ),
               ),
               const SizedBox(width: 12),
@@ -967,6 +976,12 @@ class _EpisodeRow extends StatelessWidget {
                               fontWeight: FontWeight.w600,
                             ),
                           ),
+                        ),
+                        EpisodeWatchedBadge(
+                          tmdbId: tmdbId,
+                          season: season,
+                          episode: episode.episodeNumber,
+                          margin: const EdgeInsets.only(left: 8),
                         ),
                         if (comingSoon) ...[
                           const SizedBox(width: 8),
@@ -1034,9 +1049,14 @@ class _GalleryCard extends StatelessWidget {
 }
 
 class _SimilarCard extends StatelessWidget {
-  const _SimilarCard({required this.item, required this.onTap});
+  const _SimilarCard({
+    required this.item,
+    required this.onTap,
+    this.focusNode,
+  });
   final MediaItem item;
   final VoidCallback onTap;
+  final FocusNode? focusNode;
 
   @override
   Widget build(BuildContext context) {
@@ -1044,6 +1064,7 @@ class _SimilarCard extends StatelessWidget {
     final year = item.year ?? '';
     return FocusableCard(
       onTap: onTap,
+      focusNode: focusNode,
       focusedScale: 1.04,
       ensureVisibleOnFocus: true,
       borderRadius: BorderRadius.circular(6),
@@ -1093,7 +1114,7 @@ class _SimilarCard extends StatelessWidget {
                   const SizedBox(height: 4),
                   Text(
                     item.overview ?? '',
-                    maxLines: 4,
+                    maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                       color: AppColors.textSecondary,
@@ -1104,66 +1125,6 @@ class _SimilarCard extends StatelessWidget {
               ),
             ),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-/// "See More / See Previous Episodes" pager button for long episode lists.
-class _EpisodeNavButton extends StatefulWidget {
-  const _EpisodeNavButton({
-    required this.label,
-    required this.icon,
-    required this.onTap,
-  });
-  final String label;
-  final IconData icon;
-  final VoidCallback onTap;
-
-  @override
-  State<_EpisodeNavButton> createState() => _EpisodeNavButtonState();
-}
-
-class _EpisodeNavButtonState extends State<_EpisodeNavButton> {
-  bool _focused = false;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(40, 4, 40, 4),
-      child: FocusableCard(
-        onTap: widget.onTap,
-        focusedScale: 1.01,
-        showBorder: false,
-        ensureVisibleOnFocus: true,
-        onFocusChange: (f) => setState(() => _focused = f),
-        borderRadius: BorderRadius.circular(9),
-        child: FocusRing(
-          focused: _focused,
-          radius: 9,
-          child: Container(
-            padding: const EdgeInsets.symmetric(vertical: 12),
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: AppColors.charcoalLight,
-              borderRadius: BorderRadius.circular(6),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(widget.icon, size: 20, color: AppColors.textPrimary),
-                const SizedBox(width: 8),
-                Text(
-                  widget.label,
-                  style: const TextStyle(
-                    color: AppColors.textPrimary,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ],
-            ),
-          ),
         ),
       ),
     );

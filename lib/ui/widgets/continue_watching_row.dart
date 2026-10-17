@@ -1,12 +1,14 @@
 import 'dart:math' as math;
 import 'dart:ui' show ImageFilter;
 
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
 import '../../core/focus.dart';
 import '../../core/theme.dart';
 import '../../data/store/watch_progress.dart';
 import 'poster_card.dart';
+import 'watched_check.dart';
 
 /// Slides a fixed window of posters by [step]. Moving forward hides [step]
 /// titles from the front and reveals [step] later ones. Moving back does the
@@ -462,12 +464,14 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
 class SeeMorePoster extends StatelessWidget {
   const SeeMorePoster({
     super.key,
-    required this.posterPath,
     required this.onTap,
     required this.focusNode,
+    this.posterPath,
+    this.imageUrl,
   });
 
   final String? posterPath;
+  final String? imageUrl;
   final VoidCallback onTap;
   final FocusNode focusNode;
 
@@ -488,11 +492,21 @@ class SeeMorePoster extends StatelessWidget {
               imageFilter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
               child: Transform.scale(
                 scale: 1.2,
-                child: PosterImage(
-                  path: posterPath,
-                  title: '',
-                  displayWidth: 132,
-                ),
+                child: imageUrl != null && imageUrl!.isNotEmpty
+                    ? CachedNetworkImage(
+                        imageUrl: imageUrl!,
+                        fit: BoxFit.cover,
+                        width: double.infinity,
+                        height: double.infinity,
+                        fadeInDuration: const Duration(milliseconds: 200),
+                        errorWidget: (_, _, _) =>
+                            const ColoredBox(color: AppColors.charcoalLight),
+                      )
+                    : PosterImage(
+                        path: posterPath,
+                        title: '',
+                        displayWidth: 132,
+                      ),
               ),
             ),
           ),
@@ -621,6 +635,12 @@ class _ContinueWatchingCard extends StatelessWidget {
               title: progress.title ?? '',
               displayWidth: 130,
             ),
+            if (progress.type == 'movie')
+              Positioned(
+                top: 6,
+                right: 6,
+                child: MovieWatchedBadge(tmdbId: progress.tmdbId),
+              ),
             Positioned(
               left: 0,
               right: 0,

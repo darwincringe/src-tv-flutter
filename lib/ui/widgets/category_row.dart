@@ -81,6 +81,7 @@ class _CategoryRowSectionState extends State<CategoryRowSection> {
                 child: PosterCard(
                   item: item,
                   width: 132,
+                  watchedType: widget.row.fallbackType,
                   autofocus: lead && widget.autofocusFirst,
                   focusNode: focusNode,
                   ensureVisibleOnFocus: true,

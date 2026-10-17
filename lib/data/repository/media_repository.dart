@@ -400,7 +400,8 @@ class MediaRepository {
         if (exclude.contains('$t-${item.id}')) continue;
         if (scope != 'home' && t != scope) continue;
         freq[item.id] = (freq[item.id] ?? 0) + 1;
-        byId[item.id] = item;
+        byId[item.id] =
+            item.mediaType == t ? item : item.copyWith(mediaType: t);
       }
     }
 

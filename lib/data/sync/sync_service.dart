@@ -63,6 +63,8 @@ class SyncService {
         'positionMs': p.positionMs,
         'durationMs': p.durationMs,
         'completed': p.completed,
+        'watched': p.watched,
+        'watchedEpisodes': p.watchedEpisodes,
         'title': p.title,
         'posterPath': p.posterPath,
         // Never send 0 — the server would treat it as the oldest possible write
@@ -83,6 +85,11 @@ class SyncService {
         title: d['title'] as String?,
         posterPath: d['posterPath'] as String?,
         completed: (d['completed'] as bool?) ?? false,
+        watched: (d['watched'] as bool?) ?? false,
+        watchedEpisodes: [
+          for (final e in (d['watchedEpisodes'] as List?) ?? const [])
+            e.toString(),
+        ],
       );
 
   static Map<String, dynamic> _libraryJson(LibraryItem it) {

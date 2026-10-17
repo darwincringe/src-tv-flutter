@@ -11,6 +11,7 @@ import '../../data/repository/media_repository.dart';
 import '../../data/store/recommendation_seeds.dart';
 import '../../data/tmdb/image_urls.dart';
 import '../widgets/coming_soon_badge.dart';
+import '../widgets/watched_check.dart';
 
 /// Ready-made phrases. The first one takes focus so a remote never opens
 /// inside the keyboard.
@@ -538,19 +539,31 @@ class _TitleRow extends StatelessWidget {
         padding: const EdgeInsets.all(8),
         child: Row(
           children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: SizedBox(
-                width: 46,
-                height: 68,
-                child: url != null
-                    ? CachedNetworkImage(
-                        imageUrl: url,
-                        fit: BoxFit.cover,
-                        memCacheWidth:
-                            (46 * MediaQuery.devicePixelRatioOf(context)).round(),
-                      )
-                    : Container(color: AppColors.charcoal),
+            SizedBox(
+              width: 46,
+              height: 68,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: url != null
+                        ? CachedNetworkImage(
+                            imageUrl: url,
+                            fit: BoxFit.cover,
+                            memCacheWidth: (46 *
+                                    MediaQuery.devicePixelRatioOf(context))
+                                .round(),
+                          )
+                        : Container(color: AppColors.charcoal),
+                  ),
+                  if (type == 'movie')
+                    Positioned(
+                      top: 3,
+                      right: 3,
+                      child: MovieWatchedBadge(tmdbId: item.id, size: 16),
+                    ),
+                ],
               ),
             ),
             const SizedBox(width: 12),
