@@ -12,6 +12,86 @@ class _Slot {
   final Widget child;
 }
 
+/// First page shows [initial] titles. The first See more grows that to
+/// [limit] without hiding any. Later pages stay at [limit] and step by 5.
+PosterWindow titleWindow({
+  required int start,
+  required int total,
+  required bool expanded,
+  int initial = 5,
+  int limit = 10,
+}) {
+  if (total <= 0 || limit <= 0) {
+    return const PosterWindow(
+      start: 0,
+      shown: 0,
+      canBack: false,
+      canForward: false,
+    );
+  }
+  final first = math.min(initial, total);
+  if (!expanded || total <= initial) {
+    return PosterWindow(
+      start: 0,
+      shown: first,
+      canBack: false,
+      canForward: first < total,
+    );
+  }
+  if (total <= limit) {
+    return PosterWindow(
+      start: 0,
+      shown: total,
+      canBack: total > initial,
+      canForward: false,
+    );
+  }
+  final maxStart = total - limit;
+  final clamped = start.clamp(0, maxStart);
+  return PosterWindow(
+    start: clamped,
+    shown: limit,
+    canBack: true,
+    canForward: clamped + limit < total,
+  );
+}
+
+/// Grows the first page from [initial] to [limit], then slides by [step].
+({int start, bool expanded}) titleMove({
+  required int start,
+  required int total,
+  required bool expanded,
+  required bool forward,
+  int initial = 5,
+  int limit = 10,
+  int step = 5,
+}) {
+  final page = titleWindow(
+    start: start,
+    total: total,
+    expanded: expanded,
+    initial: initial,
+    limit: limit,
+  );
+  if (!forward) {
+    if (!expanded || page.start <= 0 || total <= limit) {
+      return (start: 0, expanded: false);
+    }
+    final maxStart = total - limit;
+    return (
+      start: (page.start - step).clamp(0, maxStart),
+      expanded: true,
+    );
+  }
+  if (!page.canForward) return (start: page.start, expanded: expanded);
+  if (!expanded || total <= limit) return (start: 0, expanded: true);
+  final maxStart = total - limit;
+  return (
+    start: (page.start + step).clamp(0, maxStart),
+    expanded: true,
+  );
+}
+
 /// A fixed window of cards. See more is a blurred card of the next or previous
 /// item, and only the cards that actually change places slide.
 class SlidingWindow extends StatefulWidget {
@@ -28,6 +108,8 @@ class SlidingWindow extends StatefulWidget {
     this.cardAspect = 2 / 3,
     this.extraHeight = 0,
     this.rowExtent = 112,
+    this.titleLimit,
+    this.initialTitles = 5,
     this.firstItemFocusNode,
   });
 
@@ -51,6 +133,11 @@ class SlidingWindow extends StatefulWidget {
   final double cardAspect;
   final double extraHeight;
   final double rowExtent;
+
+  /// When set, the first See more grows the page from [initialTitles] to this
+  /// many titles. Later See more clicks keep this many and swap [step].
+  final int? titleLimit;
+  final int initialTitles;
   final FocusNode? firstItemFocusNode;
 
   @override
@@ -63,6 +150,8 @@ class _SlidingWindowState extends State<SlidingWindow>
 
   int _start = 0;
   int? _pendingStart;
+  bool _expanded = false;
+  bool? _pendingExpanded;
   bool _animating = false;
   bool _forward = true;
   FocusNode? _pendingFocus;
@@ -90,23 +179,50 @@ class _SlidingWindowState extends State<SlidingWindow>
   FocusNode get _leadNode => widget.firstItemFocusNode ?? _leadFocus;
 
   void _move(int total, int capacity, bool forward) {
-    final current = posterWindow(
-      start: _start,
-      total: total,
-      capacity: capacity,
-    );
-    final next = nextPosterStart(
-      start: current.start,
-      total: total,
-      capacity: capacity,
-      step: widget.step,
-      forward: forward,
-    );
-    if (next == current.start && _start == current.start) return;
-    final nextPage = posterWindow(start: next, total: total, capacity: capacity);
+    final int next;
+    final bool nextExpanded;
+    final PosterWindow nextPage;
+    if (widget.titleLimit != null) {
+      final moved = titleMove(
+        start: _start,
+        total: total,
+        expanded: _expanded,
+        forward: forward,
+        initial: widget.initialTitles,
+        limit: widget.titleLimit!,
+        step: widget.step,
+      );
+      if (moved.start == _start && moved.expanded == _expanded) return;
+      next = moved.start;
+      nextExpanded = moved.expanded;
+      nextPage = titleWindow(
+        start: next,
+        total: total,
+        expanded: nextExpanded,
+        initial: widget.initialTitles,
+        limit: widget.titleLimit!,
+      );
+    } else {
+      final current = posterWindow(
+        start: _start,
+        total: total,
+        capacity: capacity,
+      );
+      next = nextPosterStart(
+        start: current.start,
+        total: total,
+        capacity: capacity,
+        step: widget.step,
+        forward: forward,
+      );
+      if (next == current.start && _start == current.start) return;
+      nextExpanded = false;
+      nextPage = posterWindow(start: next, total: total, capacity: capacity);
+    }
     if (_animating) return;
     _forward = forward;
     _pendingStart = next;
+    _pendingExpanded = widget.titleLimit == null ? null : nextExpanded;
     _pendingFocus = forward && !nextPage.canForward
         ? _beginFocus
         : !forward && !nextPage.canBack
@@ -114,7 +230,10 @@ class _SlidingWindowState extends State<SlidingWindow>
             : (forward ? _endFocus : _beginFocus);
     _flying.clear();
     if (MediaQuery.disableAnimationsOf(context)) {
-      setState(() => _start = next);
+      setState(() {
+        _start = next;
+        if (widget.titleLimit != null) _expanded = nextExpanded;
+      });
       _pendingStart = null;
       _restoreFocus();
       return;
@@ -124,7 +243,9 @@ class _SlidingWindowState extends State<SlidingWindow>
       if (!mounted) return;
       setState(() {
         if (_pendingStart != null) _start = _pendingStart!;
+        if (_pendingExpanded != null) _expanded = _pendingExpanded!;
         _pendingStart = null;
+        _pendingExpanded = null;
         _animating = false;
         _flying.clear();
       });
@@ -157,7 +278,7 @@ class _SlidingWindowState extends State<SlidingWindow>
         return AnimatedBuilder(
           animation: _slide,
           builder: (context, _) {
-            final placed = _placed(width, cols, capacity);
+            final placed = _placed(width, cols, capacity, _expanded);
             if (placed.isEmpty) return const SizedBox.shrink();
             final height = placed.map((s) => s.rect.bottom).reduce(math.max);
             return SizedBox(
@@ -180,11 +301,17 @@ class _SlidingWindowState extends State<SlidingWindow>
     );
   }
 
-  List<_Slot> _placed(double width, int cols, int capacity) {
-    final current = _slotsFor(_start, width, cols, capacity);
+  List<_Slot> _placed(double width, int cols, int capacity, bool expanded) {
+    final current = _slotsFor(_start, width, cols, capacity, expanded);
     final nextStart = _animating ? _pendingStart : null;
     if (nextStart == null) return current;
-    final incoming = _slotsFor(nextStart, width, cols, capacity);
+    final incoming = _slotsFor(
+      nextStart,
+      width,
+      cols,
+      capacity,
+      _pendingExpanded ?? expanded,
+    );
     return widget.vertical
         ? _slideVertical(current, incoming, _stackHeight(current))
         : _slideHorizontal(current, incoming, width);
@@ -358,9 +485,23 @@ class _SlidingWindowState extends State<SlidingWindow>
     return moved;
   }
 
-  List<_Slot> _slotsFor(int start, double width, int cols, int capacity) {
+  List<_Slot> _slotsFor(
+    int start,
+    double width,
+    int cols,
+    int capacity,
+    bool expanded,
+  ) {
     final total = widget.itemCount;
-    final page = posterWindow(start: start, total: total, capacity: capacity);
+    final page = widget.titleLimit == null
+        ? posterWindow(start: start, total: total, capacity: capacity)
+        : titleWindow(
+            start: start,
+            total: total,
+            expanded: expanded,
+            initial: widget.initialTitles,
+            limit: widget.titleLimit!,
+          );
     final ids = <String>[];
     if (page.canBack) ids.add('back');
     for (var i = 0; i < page.shown; i++) {
@@ -402,7 +543,10 @@ class _SlidingWindowState extends State<SlidingWindow>
 
   Widget _childForId(String id, PosterWindow page, int total, int capacity) {
     if (id == 'back' || id == 'forward') {
-      final index = id == 'back' ? page.previousIndex : page.nextIndex;
+      var index = id == 'back' ? page.previousIndex : page.nextIndex;
+      if (id == 'back' && index < 0 && page.shown > 0) {
+        index = page.start + page.shown - 1;
+      }
       final url = index >= 0 && index < total ? widget.imageUrl(index) : null;
       return SeeMorePoster(
         imageUrl: url,

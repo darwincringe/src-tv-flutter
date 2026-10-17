@@ -575,6 +575,8 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
             itemCount: _similar.length,
             columns: portrait ? 2 : 3,
             rows: 2,
+            initialTitles: 5,
+            titleLimit: 10,
             step: 5,
             gap: 16,
             cardAspect: 16 / 9,

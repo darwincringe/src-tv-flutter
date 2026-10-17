@@ -53,8 +53,39 @@ void main() {
     await tester.pumpAndSettle();
   });
 
-  testWidgets('more like this keeps a see more card at both ends', (tester) async {
-    await tester.binding.setSurfaceSize(const Size(900, 800));
+  test('more like this grows to 10, then swaps 5 at a time', () {
+    expect(
+      titleMove(start: 0, total: 23, expanded: false, forward: true),
+      (start: 0, expanded: true),
+    );
+    expect(
+      titleWindow(start: 0, total: 23, expanded: true).shown,
+      10,
+    );
+    expect(
+      titleMove(start: 0, total: 23, expanded: true, forward: true).start,
+      5,
+    );
+    expect(
+      titleMove(start: 5, total: 23, expanded: true, forward: true).start,
+      10,
+    );
+    expect(
+      titleMove(start: 10, total: 23, expanded: true, forward: true).start,
+      13,
+    );
+    expect(
+      titleMove(start: 13, total: 23, expanded: true, forward: false).start,
+      8,
+    );
+    expect(
+      titleMove(start: 0, total: 23, expanded: true, forward: false).expanded,
+      isFalse,
+    );
+  });
+
+  testWidgets('more like this adds 5 first, then keeps 10', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(900, 2200));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
@@ -64,7 +95,9 @@ void main() {
             columns: 3,
             rows: 2,
             step: 5,
-            itemCount: 14,
+            initialTitles: 5,
+            titleLimit: 10,
+            itemCount: 16,
             imageUrl: (_) => null,
             itemBuilder: (_, i, _, _) => Text('like-$i'),
           ),
@@ -73,15 +106,27 @@ void main() {
     ));
 
     expect(find.text('like-0'), findsOneWidget);
+    expect(find.text('like-4'), findsOneWidget);
+    expect(find.text('like-5'), findsNothing);
     expect(find.text('See more'), findsOneWidget);
 
     await tester.tap(find.text('See more'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
+    expect(find.text('like-0'), findsOneWidget);
+    expect(find.text('like-9'), findsOneWidget);
+    expect(find.text('like-10'), findsNothing);
+    expect(find.text('See more'), findsNWidgets(2));
+
+    await tester.tap(find.text('See more').last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
     expect(find.text('like-0'), findsNothing);
     expect(find.text('like-5'), findsOneWidget);
-    expect(find.text('See more'), findsNWidgets(2));
+    expect(find.text('like-14'), findsOneWidget);
+    expect(find.text('like-15'), findsNothing);
     await tester.pumpAndSettle();
   });
 
