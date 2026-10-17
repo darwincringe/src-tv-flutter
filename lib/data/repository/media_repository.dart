@@ -495,18 +495,24 @@ class MediaRepository {
   Future<void> enrichPosters(List<WatchProgress> visible) {
     final need = [
       for (final p in visible)
-        if (!p.posterChecked || (p.posterPath?.isEmpty ?? true)) p,
+        if (!p.posterChecked) p,
     ];
     return _mapLimited(need, (p) async {
       try {
         final d = await details(p.type, p.tmdbId, extras: false);
-        WatchProgressStore.save(p.copyWith(
-          title: (p.title?.isNotEmpty ?? false) ? p.title : d.title,
-          posterPath: (d.posterPath?.isNotEmpty ?? false)
-              ? d.posterPath
-              : p.posterPath,
-          posterChecked: true,
-        ));
+        final poster = (d.posterPath?.isNotEmpty ?? false)
+            ? d.posterPath
+            : p.posterPath;
+        // Checked even when TMDB has no poster, so a missing image cannot
+        // retry forever. This write stays on the device.
+        WatchProgressStore.save(
+          p.copyWith(
+            title: (p.title?.isNotEmpty ?? false) ? p.title : d.title,
+            posterPath: poster,
+            posterChecked: true,
+          ),
+          sync: false,
+        );
       } catch (_) {}
       return p;
     });

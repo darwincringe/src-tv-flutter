@@ -601,7 +601,7 @@ class _ContinueWatchingRowState extends ConsumerState<ContinueWatchingRow> {
     final fresh = <WatchProgress>[];
     for (var i = start; i < end; i++) {
       final p = widget.items[i];
-      if (p.posterChecked && (p.posterPath?.isNotEmpty ?? false)) continue;
+      if (p.posterChecked) continue;
       final key = '${p.type}-${p.tmdbId}';
       if (_busy.add(key)) fresh.add(p);
     }

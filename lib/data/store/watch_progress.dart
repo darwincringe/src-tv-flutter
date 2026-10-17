@@ -238,16 +238,43 @@ class WatchProgressStore {
     WatchProgress p, {
     int? finishedSeason,
     int? finishedEpisode,
+    bool sync = true,
   }) {
+    final previous = get(p.type, p.tmdbId);
     final stored = retainWatched(
       p,
-      previous: get(p.type, p.tmdbId),
+      previous: previous,
       finishedSeason: finishedSeason,
       finishedEpisode: finishedEpisode,
     );
     _prefs.setString(_key(stored.type, stored.tmdbId), jsonEncode(stored.toJson()));
     revision.value++;
-    onSaved?.call(stored);
+    // Poster repairs and account pulls must not upload. A playback save uploads
+    // only when the resume point, episode, or watched mark actually changed,
+    // so a redraw cannot PUT the same record again.
+    if (sync && _playbackChanged(previous, stored)) {
+      onSaved?.call(stored);
+    }
+  }
+
+  static bool _playbackChanged(WatchProgress? previous, WatchProgress next) {
+    if (previous == null) return true;
+    if (previous.positionMs != next.positionMs) return true;
+    if (previous.durationMs != next.durationMs) return true;
+    if (previous.season != next.season || previous.episode != next.episode) {
+      return true;
+    }
+    if (previous.completed != next.completed || previous.watched != next.watched) {
+      return true;
+    }
+    if (previous.watchedEpisodes.length != next.watchedEpisodes.length) {
+      return true;
+    }
+    final seen = previous.watchedEpisodes.toSet();
+    for (final ep in next.watchedEpisodes) {
+      if (!seen.contains(ep)) return true;
+    }
+    return false;
   }
 
   /// Mark a movie watched without moving its resume point.

@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:dio/dio.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/router.dart';
 import '../auth/auth_service.dart';
@@ -24,12 +27,22 @@ class SyncService {
   /// True while a full upload+download is already running.
   static bool _syncing = false;
 
+  /// Newest progress this device has already downloaded, and the newest it has
+  /// confirmed uploaded. Absent until the first sync after this cursor existed,
+  /// which then starts from the newest progress already stored on the device
+  /// instead of the whole account history.
+  static const _kProgressSince = 'sync_progress_since';
+  static const _kProgressPushed = 'sync_progress_pushed';
+
+  static final Map<String, Map<String, dynamic>> _pendingProgress = {};
+  static Timer? _progressFlush;
+
   /// Wire the local-store hooks to push individual changes as they happen.
   /// Call once at startup (after the stores + AuthService are initialised).
   static void init() {
     WatchProgressStore.onSaved = (p) {
       if (_pulling || !AuthService.isSignedIn) return;
-      _push('progress', _progressJson(p), put: true);
+      _queueProgress(p);
     };
     WatchProgressStore.onRemoved = (type, id) {
       if (_pulling || !AuthService.isSignedIn) return;
@@ -168,6 +181,34 @@ class SyncService {
 
   // ---- single-item push (from the store hooks) ---------------------------
 
+  /// Several saves in a row become one PUT of the latest position per title.
+  static void _queueProgress(WatchProgress p) {
+    _pendingProgress['${p.type}-${p.tmdbId}'] = _progressJson(p);
+    _progressFlush ??= Timer(const Duration(seconds: 2), () {
+      _progressFlush = null;
+      final batch = Map<String, Map<String, dynamic>>.of(_pendingProgress);
+      _pendingProgress.clear();
+      for (final body in batch.values) {
+        _push('progress', body, put: true);
+      }
+    });
+  }
+
+  static Future<SharedPreferences> _prefs() => SharedPreferences.getInstance();
+
+  /// Cursor for the next pull. The first time, use the newest progress already
+  /// on this device so opening the app does not download the whole history.
+  static Future<int> _progressSince() async {
+    final prefs = await _prefs();
+    final stored = prefs.getInt(_kProgressSince);
+    if (stored != null) return stored;
+    var since = 0;
+    for (final p in WatchProgressStore.all()) {
+      if (p.updatedAt > since) since = p.updatedAt;
+    }
+    return since;
+  }
+
   static Future<void> _push(
     String path,
     Map<String, dynamic> body, {
@@ -224,13 +265,30 @@ class SyncService {
   static Future<bool> pushAllLocal() async {
     if (!AuthService.isSignedIn) return false;
     try {
-      final records = WatchProgressStore.all().map(_progressJson).toList();
+      final prefs = await _prefs();
+      final pushed = prefs.getInt(_kProgressPushed);
+      final floor = pushed ??
+          WatchProgressStore.all().fold<int>(
+            0,
+            (maxAt, p) => p.updatedAt > maxAt ? p.updatedAt : maxAt,
+          );
+      if (pushed == null) await prefs.setInt(_kProgressPushed, floor);
+      final records = [
+        for (final p in WatchProgressStore.all())
+          if (p.updatedAt > floor) _progressJson(p),
+      ];
       if (records.isNotEmpty) {
         await AuthService.dio.post(
           'progress/batch',
           data: {'records': records},
           options: AuthService.authOptions(),
         );
+        var maxAt = floor;
+        for (final r in records) {
+          final at = (r['updatedAt'] as num?)?.toInt() ?? 0;
+          if (at > maxAt) maxAt = at;
+        }
+        await prefs.setInt(_kProgressPushed, maxAt);
       }
       for (final it in LibraryStore.every()) {
         if (it.deleted) {
@@ -262,20 +320,35 @@ class SyncService {
     if (!AuthService.isSignedIn) return;
     _pulling = true;
     try {
+      final since = await _progressSince();
       final pr = await AuthService.dio.get(
         'progress',
+        queryParameters: {'since': since},
         options: AuthService.authOptions(),
       );
+      var cursor = since;
       if (pr.data is List) {
         for (final d in (pr.data as List)) {
           if (d is! Map) continue;
           final remote = _progressFrom(Map<String, dynamic>.from(d));
+          if (remote.updatedAt > cursor) cursor = remote.updatedAt;
           final local = WatchProgressStore.get(remote.type, remote.tmdbId);
-          if (local == null || remote.updatedAt >= local.updatedAt) {
-            WatchProgressStore.save(remote);
-          }
+          if (local != null && remote.updatedAt < local.updatedAt) continue;
+          final keepPoster = local != null &&
+              local.posterChecked &&
+              !remote.posterChecked;
+          WatchProgressStore.save(
+            keepPoster
+                ? remote.copyWith(
+                    posterPath: local.posterPath,
+                    posterChecked: true,
+                  )
+                : remote,
+            sync: false,
+          );
         }
       }
+      await (await _prefs()).setInt(_kProgressSince, cursor);
       final lr = await AuthService.dio.get(
         'library',
         options: AuthService.authOptions(),
