@@ -158,11 +158,8 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
   int? _pendingStart;
   bool _animating = false;
   bool _portrait = false;
+  int? _portraitShown;
   final ScrollController _scroller = ScrollController();
-  double? _anchorScreenX;
-  double? _anchorFromX;
-  double? _anchorToX;
-  bool _anchorSyncQueued = false;
   bool _forward = true;
   FocusNode? _pendingFocus;
   final Map<String, Widget> _flying = {};
@@ -178,12 +175,10 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
   void initState() {
     super.initState();
     _slide = AnimationController(vsync: this, duration: _slideDuration);
-    _slide.addListener(_onSlide);
   }
 
   @override
   void dispose() {
-    _slide.removeListener(_onSlide);
     _slide.dispose();
     _scroller.dispose();
     _beginFocus.dispose();
@@ -195,6 +190,10 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
   FocusNode get _leadNode => widget.firstItemFocusNode ?? _leadFocus;
 
   void _move(int total, int capacity, bool forward) {
+    if (_portrait) {
+      if (forward) _growPortrait(total, capacity);
+      return;
+    }
     final current = posterWindow(
       start: _start,
       total: total,
@@ -217,43 +216,12 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
     _forward = forward;
     _pendingStart = next;
     _noteVisible(next, total, capacity);
-    // Portrait keeps See more at the end of the scroll. Focusing it would
-    // pull that card back onto the first screen.
-    _pendingFocus = _portrait
-        ? null
-        : forward && !nextPage.canForward
-            ? _beginFocus
-            : !forward && !nextPage.canBack
-                ? _leadNode
-                : (forward ? _endFocus : _beginFocus);
+    _pendingFocus = forward && !nextPage.canForward
+        ? _beginFocus
+        : !forward && !nextPage.canBack
+            ? _leadNode
+            : (forward ? _endFocus : _beginFocus);
     _flying.clear();
-    if (_portrait) {
-      _rememberAnchor(
-        tapped: forward ? 'forward' : 'back',
-        next: next,
-        total: total,
-        capacity: capacity,
-      );
-      if (MediaQuery.disableAnimationsOf(context)) {
-        setState(() => _start = next);
-        _pendingStart = null;
-        _scheduleAnchorSync(forceEnd: true);
-        return;
-      }
-      setState(() => _animating = true);
-      _slide.forward(from: 0).whenComplete(() {
-        if (!mounted) return;
-        setState(() {
-          if (_pendingStart != null) _start = _pendingStart!;
-          _pendingStart = null;
-          _animating = false;
-          _flying.clear();
-        });
-        _slide.value = 0;
-        _scheduleAnchorSync(forceEnd: true);
-      });
-      return;
-    }
     if (MediaQuery.disableAnimationsOf(context)) {
       setState(() => _start = next);
       _pendingStart = null;
@@ -344,92 +312,63 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
     );
   }
 
-  void _onSlide() {
-    if (!_portrait || !_animating) return;
-    _scheduleAnchorSync(forceEnd: false);
+  /// Adds the next titles after the ones already on screen. Existing cards
+  /// and the scroll position stay put, so the title in view does not move.
+  void _growPortrait(int total, int capacity) {
+    final shown = _portraitShown ?? _firstPortraitShown(total, capacity);
+    if (shown >= total) return;
+    final next = math.min(total, shown + widget.step);
+    if (next == shown) return;
+    _endFocus.unfocus();
+    setState(() => _portraitShown = next);
+    _noteRange(0, next);
   }
 
-  void _scheduleAnchorSync({required bool forceEnd}) {
-    if (_anchorSyncQueued) return;
-    _anchorSyncQueued = true;
+  int _firstPortraitShown(int total, int capacity) {
+    if (total <= capacity) return total;
+    return math.max(1, capacity - 1);
+  }
+
+  void _noteRange(int start, int shown) {
+    if (widget.onVisible == null || shown <= 0) return;
+    if (_visibleStart == start && _visibleShown == shown) return;
+    _visibleStart = start;
+    _visibleShown = shown;
+    if (_visibleQueued) return;
+    _visibleQueued = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _anchorSyncQueued = false;
-      _syncAnchorScroll(forceEnd: forceEnd);
+      _visibleQueued = false;
+      if (!mounted || _visibleStart == null || _visibleShown == null) return;
+      widget.onVisible!(_visibleStart!, _visibleShown!);
     });
   }
 
-  /// Keeps the See more card that was tapped at the same spot on screen.
-  /// The posters around it are what move.
-  void _rememberAnchor({
-    required String tapped,
-    required int next,
-    required int total,
-    required int capacity,
-  }) {
-    final fromX = _portraitContentX(tapped, _start, total, capacity);
-    _anchorFromX = fromX;
-    _anchorScreenX = fromX == null || !_scroller.hasClients
-        ? null
-        : fromX - _scroller.offset;
-    final nextId = _anchorOnPage(tapped, next, total, capacity);
-    _anchorToX = _portraitContentX(nextId, next, total, capacity);
-  }
-
-  String _anchorOnPage(String tapped, int start, int total, int capacity) {
-    final page = posterWindow(start: start, total: total, capacity: capacity);
-    if (tapped == 'forward' && page.canForward) return 'forward';
-    if (tapped == 'back' && page.canBack) return 'back';
-    if (page.shown <= 0) return tapped;
-    if (tapped == 'forward') return 'p${page.start + page.shown - 1}';
-    return 'p${page.start}';
-  }
-
-  double? _portraitContentX(String id, int start, int total, int capacity) {
-    final page = posterWindow(start: start, total: total, capacity: capacity);
-    final ids = <String>[];
-    if (page.canBack) ids.add('back');
-    for (var i = 0; i < page.shown; i++) {
-      ids.add('p${page.start + i}');
-    }
-    if (page.canForward) ids.add('forward');
-    final index = ids.indexOf(id);
-    if (index < 0) return null;
-    final col = index ~/ math.max(1, widget.rows);
-    return col * (_extent + _gap);
-  }
-
-  void _syncAnchorScroll({required bool forceEnd}) {
-    final screen = _anchorScreenX;
-    final from = _anchorFromX;
-    final to = _anchorToX;
-    if (screen == null || from == null || to == null || !_scroller.hasClients) {
-      return;
-    }
-    final t = forceEnd
-        ? 1.0
-        : Curves.easeOutCubic.transform(_slide.value.clamp(0.0, 1.0));
-    final x = from + (to - from) * t;
-    final max = _scroller.position.maxScrollExtent;
-    final target = (x - screen).clamp(0.0, max);
-    if ((_scroller.offset - target).abs() > 0.5) {
-      _scroller.jumpTo(target);
-    }
-  }
-
-  /// Portrait keeps a fixed poster size and scrolls. See more is the last
-  /// cell. Tapping it slides the posters and leaves that card where it was.
+  /// Portrait scrolls a fixed-size row. See more appends titles to the right.
   Widget _portraitStrip(double width, int total) {
     final viewportCols = math.max(1, (width / (_extent + _gap)).floor());
     final pageCols = math.max(10, viewportCols + 3);
     final capacity = pageCols * widget.rows;
-    _noteVisible(
-      _animating ? (_pendingStart ?? _start) : _start,
+    final shown = math.min(
       total,
-      capacity,
+      _portraitShown ?? _firstPortraitShown(total, capacity),
     );
+    _portraitShown = shown;
+    _noteRange(0, shown);
+    if (shown <= 0) return const SizedBox.shrink();
+
     const cardWidth = _extent;
     final cardHeight = cardWidth * 3 / 2;
     final rows = math.max(1, widget.rows);
+    final page = PosterWindow(
+      start: 0,
+      shown: shown,
+      canBack: false,
+      canForward: shown < total,
+    );
+    final ids = <String>[
+      for (var i = 0; i < shown; i++) 'p$i',
+      if (page.canForward) 'forward',
+    ];
     Rect at(int slot) {
       final col = slot ~/ rows;
       final row = slot % rows;
@@ -441,69 +380,39 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
       );
     }
 
-    List<_Slot> slotsFor(int start) {
-      final page = posterWindow(start: start, total: total, capacity: capacity);
-      final ids = <String>[];
-      if (page.canBack) ids.add('back');
-      for (var i = 0; i < page.shown; i++) {
-        ids.add('p${page.start + i}');
-      }
-      if (page.canForward) ids.add('forward');
-      return [
-        for (var i = 0; i < ids.length; i++)
-          _Slot(
-            id: ids[i],
-            rect: at(i),
-            child: _childForId(ids[i], page, total, capacity),
-          ),
-      ];
-    }
-
-    return AnimatedBuilder(
-      animation: _slide,
-      builder: (context, _) {
-        final current = slotsFor(_start);
-        final incoming = _animating && _pendingStart != null
-            ? slotsFor(_pendingStart!)
-            : null;
-        final placed = incoming == null
-            ? current
-            : _slideSlots(
-                current,
-                incoming,
-                (_scroller.hasClients ? _scroller.offset : 0) + width,
-              );
-        if (placed.isEmpty) return const SizedBox.shrink();
-        final contentWidth = [
-          ...current,
-          ...?incoming,
-          ...placed,
-        ].map((slot) => slot.rect.right).reduce(math.max);
-        final height = placed.map((slot) => slot.rect.bottom).reduce(math.max);
-        return SizedBox(
-          width: width,
+    final placed = [
+      for (var i = 0; i < ids.length; i++)
+        _Slot(
+          id: ids[i],
+          rect: at(i),
+          child: _childForId(ids[i], page, total, capacity),
+        ),
+    ];
+    final contentWidth = placed.map((slot) => slot.rect.right).reduce(math.max);
+    final height = placed.map((slot) => slot.rect.bottom).reduce(math.max);
+    return SizedBox(
+      width: width,
+      height: height,
+      child: SingleChildScrollView(
+        controller: _scroller,
+        scrollDirection: Axis.horizontal,
+        clipBehavior: Clip.hardEdge,
+        child: SizedBox(
+          width: math.max(width, contentWidth),
           height: height,
-          child: SingleChildScrollView(
-            controller: _scroller,
-            scrollDirection: Axis.horizontal,
-            physics: _animating
-                ? const NeverScrollableScrollPhysics()
-                : null,
-            clipBehavior: Clip.hardEdge,
-            child: SizedBox(
-              width: math.max(width, contentWidth),
-              height: height,
-              child: Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  for (final slot in placed)
-                    Positioned.fromRect(rect: slot.rect, child: slot.child),
-                ],
-              ),
-            ),
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              for (final slot in placed)
+                Positioned.fromRect(
+                  key: ValueKey(slot.id),
+                  rect: slot.rect,
+                  child: slot.child,
+                ),
+            ],
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 
@@ -690,6 +599,7 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
     return SeeMorePoster(
       posterPath: path,
       focusNode: back ? _beginFocus : _endFocus,
+      ensureVisible: !_portrait,
       onTap: () => _move(total, capacity, !back),
     );
   }
@@ -704,12 +614,14 @@ class SeeMorePoster extends StatelessWidget {
     required this.focusNode,
     this.posterPath,
     this.imageUrl,
+    this.ensureVisible = true,
   });
 
   final String? posterPath;
   final String? imageUrl;
   final VoidCallback onTap;
   final FocusNode focusNode;
+  final bool ensureVisible;
 
   @override
   Widget build(BuildContext context) {
@@ -718,7 +630,7 @@ class SeeMorePoster extends StatelessWidget {
       onTap: onTap,
       focusedScale: 1.08,
       borderWidth: 3,
-      ensureVisibleOnFocus: true,
+      ensureVisibleOnFocus: ensureVisible,
       borderRadius: BorderRadius.circular(10),
       child: Stack(
         fit: StackFit.expand,

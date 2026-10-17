@@ -155,11 +155,7 @@ class _SlidingWindowState extends State<SlidingWindow>
   bool _animating = false;
   bool _forward = true;
   bool _narrowPortrait = false;
-  double _stripStride = 194;
-  double? _anchorScreenX;
-  double? _anchorFromX;
-  double? _anchorToX;
-  bool _anchorSyncQueued = false;
+  int? _portraitShown;
   FocusNode? _pendingFocus;
   final ScrollController _scroller = ScrollController();
   final Map<String, Widget> _flying = {};
@@ -172,12 +168,10 @@ class _SlidingWindowState extends State<SlidingWindow>
   void initState() {
     super.initState();
     _slide = AnimationController(vsync: this, duration: _slideDuration);
-    _slide.addListener(_onSlide);
   }
 
   @override
   void dispose() {
-    _slide.removeListener(_onSlide);
     _slide.dispose();
     _scroller.dispose();
     _beginFocus.dispose();
@@ -230,51 +224,19 @@ class _SlidingWindowState extends State<SlidingWindow>
       nextPage = posterWindow(start: next, total: total, capacity: capacity);
     }
     if (_animating) return;
+    if (_narrowPortrait) {
+      if (forward) _growPortrait(total);
+      return;
+    }
     _forward = forward;
     _pendingStart = next;
     _pendingExpanded = widget.titleLimit == null ? null : nextExpanded;
-    _pendingFocus = _narrowPortrait
-        ? null
-        : forward && !nextPage.canForward
+    _pendingFocus = forward && !nextPage.canForward
             ? _beginFocus
             : !forward && !nextPage.canBack
                 ? _leadNode
                 : (forward ? _endFocus : _beginFocus);
     _flying.clear();
-    if (_narrowPortrait) {
-      _rememberAnchor(
-        tapped: forward ? 'forward' : 'back',
-        next: next,
-        nextExpanded: nextExpanded,
-        total: total,
-        capacity: capacity,
-      );
-      if (MediaQuery.disableAnimationsOf(context)) {
-        setState(() {
-          _start = next;
-          if (widget.titleLimit != null) _expanded = nextExpanded;
-        });
-        _pendingStart = null;
-        _pendingExpanded = null;
-        _scheduleAnchorSync(forceEnd: true);
-        return;
-      }
-      setState(() => _animating = true);
-      _slide.forward(from: 0).whenComplete(() {
-        if (!mounted) return;
-        setState(() {
-          if (_pendingStart != null) _start = _pendingStart!;
-          if (_pendingExpanded != null) _expanded = _pendingExpanded!;
-          _pendingStart = null;
-          _pendingExpanded = null;
-          _animating = false;
-          _flying.clear();
-        });
-        _slide.value = 0;
-        _scheduleAnchorSync(forceEnd: true);
-      });
-      return;
-    }
     if (MediaQuery.disableAnimationsOf(context)) {
       setState(() {
         _start = next;
@@ -353,190 +315,82 @@ class _SlidingWindowState extends State<SlidingWindow>
     );
   }
 
-  void _onSlide() {
-    if (!_narrowPortrait || !_animating) return;
-    _scheduleAnchorSync(forceEnd: false);
+  /// Adds the next titles to the right. Cards already on screen do not move.
+  void _growPortrait(int total) {
+    final shown = _portraitShown ?? math.min(total, widget.initialTitles);
+    if (shown >= total) return;
+    _endFocus.unfocus();
+    setState(() => _portraitShown = math.min(total, shown + widget.step));
   }
 
-  void _scheduleAnchorSync({required bool forceEnd}) {
-    if (_anchorSyncQueued) return;
-    _anchorSyncQueued = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _anchorSyncQueued = false;
-      _syncAnchorScroll(forceEnd: forceEnd);
-    });
-  }
-
-  void _rememberAnchor({
-    required String tapped,
-    required int next,
-    required bool nextExpanded,
-    required int total,
-    required int capacity,
-  }) {
-    final fromX = _stripContentX(tapped, _start, _expanded, total, capacity);
-    _anchorFromX = fromX;
-    _anchorScreenX = fromX == null || !_scroller.hasClients
-        ? null
-        : fromX - _scroller.offset;
-    final nextId = _anchorOnPage(tapped, next, nextExpanded, total, capacity);
-    _anchorToX = _stripContentX(nextId, next, nextExpanded, total, capacity);
-  }
-
-  PosterWindow _stripPage(
-    int start,
-    bool expanded,
-    int total,
-    int capacity,
-  ) {
-    if (widget.titleLimit == null) {
-      return posterWindow(start: start, total: total, capacity: capacity);
-    }
-    return titleWindow(
-      start: start,
-      total: total,
-      expanded: expanded,
-      initial: widget.initialTitles,
-      limit: widget.titleLimit!,
-    );
-  }
-
-  String _anchorOnPage(
-    String tapped,
-    int start,
-    bool expanded,
-    int total,
-    int capacity,
-  ) {
-    final page = _stripPage(start, expanded, total, capacity);
-    if (tapped == 'forward' && page.canForward) return 'forward';
-    if (tapped == 'back' && page.canBack) return 'back';
-    if (page.shown <= 0) return tapped;
-    if (tapped == 'forward') return 'p${page.start + page.shown - 1}';
-    return 'p${page.start}';
-  }
-
-  double? _stripContentX(
-    String id,
-    int start,
-    bool expanded,
-    int total,
-    int capacity,
-  ) {
-    final page = _stripPage(start, expanded, total, capacity);
-    final ids = <String>[];
-    if (page.canBack) ids.add('back');
-    for (var i = 0; i < page.shown; i++) {
-      ids.add('p${page.start + i}');
-    }
-    if (page.canForward) ids.add('forward');
-    final index = ids.indexOf(id);
-    if (index < 0) return null;
-    final col = index ~/ math.max(1, widget.rows);
-    return col * _stripStride;
-  }
-
-  void _syncAnchorScroll({required bool forceEnd}) {
-    final screen = _anchorScreenX;
-    final from = _anchorFromX;
-    final to = _anchorToX;
-    if (screen == null || from == null || to == null || !_scroller.hasClients) {
-      return;
-    }
-    final t = forceEnd
-        ? 1.0
-        : Curves.easeOutCubic.transform(_slide.value.clamp(0.0, 1.0));
-    final x = from + (to - from) * t;
-    final max = _scroller.position.maxScrollExtent;
-    final target = (x - screen).clamp(0.0, max);
-    if ((_scroller.offset - target).abs() > 0.5) {
-      _scroller.jumpTo(target);
-    }
-  }
-
-  /// Phone portrait scrolls the page. See more stays where it was tapped
-  /// while the posters slide.
+  /// Phone portrait scrolls the row. See more appends titles further along.
   Widget _portraitStrip(double width, bool expanded) {
     final total = widget.itemCount;
     final rows = math.max(1, widget.rows);
     final cardWidth = math.min(280.0, math.max(180.0, width * 0.72));
     final cardHeight = cardWidth / widget.cardAspect + widget.extraHeight;
-    final pageCols = math.max(4, (width / (cardWidth + widget.gap)).ceil() + 2);
-    final capacity = pageCols * rows;
-    _stripStride = cardWidth + widget.gap;
+    final stride = cardWidth + widget.gap;
+    final shown = math.min(
+      total,
+      _portraitShown ?? math.min(total, widget.initialTitles),
+    );
+    _portraitShown = shown;
+    if (shown <= 0) return const SizedBox.shrink();
 
+    final page = PosterWindow(
+      start: 0,
+      shown: shown,
+      canBack: false,
+      canForward: shown < total,
+    );
+    final ids = <String>[
+      for (var i = 0; i < shown; i++) 'p$i',
+      if (page.canForward) 'forward',
+    ];
     Rect at(int slot) {
       final col = slot ~/ rows;
       final row = slot % rows;
       return Rect.fromLTWH(
-        col * _stripStride,
+        col * stride,
         row * (cardHeight + widget.gap),
         cardWidth,
         cardHeight,
       );
     }
 
-    List<_Slot> slotsFor(int start, bool pageExpanded) {
-      final page = _stripPage(start, pageExpanded, total, capacity);
-      final ids = <String>[];
-      if (page.canBack) ids.add('back');
-      for (var i = 0; i < page.shown; i++) {
-        ids.add('p${page.start + i}');
-      }
-      if (page.canForward) ids.add('forward');
-      return [
-        for (var i = 0; i < ids.length; i++)
-          _Slot(
-            id: ids[i],
-            rect: at(i),
-            child: _childForId(ids[i], page, total, capacity),
-          ),
-      ];
-    }
-
-    return AnimatedBuilder(
-      animation: _slide,
-      builder: (context, _) {
-        final current = slotsFor(_start, expanded);
-        final incoming = _animating && _pendingStart != null
-            ? slotsFor(_pendingStart!, _pendingExpanded ?? expanded)
-            : null;
-        final placed = incoming == null
-            ? current
-            : _slideHorizontal(
-                current,
-                incoming,
-                (_scroller.hasClients ? _scroller.offset : 0) + width,
-              );
-        if (placed.isEmpty) return const SizedBox.shrink();
-        final contentWidth = [
-          ...current,
-          ...?incoming,
-          ...placed,
-        ].map((slot) => slot.rect.right).reduce(math.max);
-        final height = placed.map((slot) => slot.rect.bottom).reduce(math.max);
-        return SizedBox(
-          width: width,
+    final placed = [
+      for (var i = 0; i < ids.length; i++)
+        _Slot(
+          id: ids[i],
+          rect: at(i),
+          child: _childForId(ids[i], page, total, shown + 1),
+        ),
+    ];
+    final contentWidth = placed.map((slot) => slot.rect.right).reduce(math.max);
+    final height = placed.map((slot) => slot.rect.bottom).reduce(math.max);
+    return SizedBox(
+      width: width,
+      height: height,
+      child: SingleChildScrollView(
+        controller: _scroller,
+        scrollDirection: Axis.horizontal,
+        clipBehavior: Clip.hardEdge,
+        child: SizedBox(
+          width: math.max(width, contentWidth),
           height: height,
-          child: SingleChildScrollView(
-            controller: _scroller,
-            scrollDirection: Axis.horizontal,
-            physics: _animating ? const NeverScrollableScrollPhysics() : null,
-            clipBehavior: Clip.hardEdge,
-            child: SizedBox(
-              width: math.max(width, contentWidth),
-              height: height,
-              child: Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  for (final slot in placed)
-                    Positioned.fromRect(rect: slot.rect, child: slot.child),
-                ],
-              ),
-            ),
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              for (final slot in placed)
+                Positioned.fromRect(
+                  key: ValueKey(slot.id),
+                  rect: slot.rect,
+                  child: slot.child,
+                ),
+            ],
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 
@@ -790,6 +644,7 @@ class _SlidingWindowState extends State<SlidingWindow>
       return SeeMorePoster(
         imageUrl: url,
         focusNode: id == 'back' ? _beginFocus : _endFocus,
+        ensureVisible: !_narrowPortrait,
         onTap: () => _move(total, capacity, id == 'forward'),
       );
     }

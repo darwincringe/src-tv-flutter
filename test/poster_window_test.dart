@@ -170,20 +170,30 @@ void main() {
     );
     final before = tester.getTopLeft(find.text('See more')).dx;
     expect(before, lessThan(320));
+    final held = tester.getTopLeft(find.text('title-7')).dx;
+    final offset = tester
+        .state<ScrollableState>(find.byType(Scrollable))
+        .position
+        .pixels;
 
     await tester.tap(find.text('See more'));
     await tester.pumpAndSettle();
 
-    expect(find.text('title-0'), findsNothing);
-    expect(find.text('title-5'), findsOneWidget);
+    expect(find.text('title-0'), findsOneWidget);
+    expect(tester.getTopLeft(find.text('title-0')).dx, lessThan(0));
+    expect(tester.getTopLeft(find.text('title-7')).dx, held);
+    expect(
+      tester.state<ScrollableState>(find.byType(Scrollable)).position.pixels,
+      offset,
+    );
+    expect(find.text('title-9'), findsOneWidget);
     var after = 0.0;
     final seeMore = find.text('See more');
     for (var i = 0; i < seeMore.evaluate().length; i++) {
       final dx = tester.getTopLeft(seeMore.at(i)).dx;
       if (dx > after) after = dx;
     }
-    expect(after, lessThan(320));
-    expect((after - before).abs(), lessThan(24));
+    expect(after, greaterThan(before + 100));
   });
 
   testWidgets('a poster that stays slides into its new cell', (tester) async {
