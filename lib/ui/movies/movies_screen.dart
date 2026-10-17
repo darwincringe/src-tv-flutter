@@ -9,7 +9,7 @@ class MoviesScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return MediaBrowseScreen(
       scope: 'movie',
-      loadRows: (repo) => repo.movieRows(),
+      loadRows: (repo) => repo.movieSources(),
     );
   }
 }

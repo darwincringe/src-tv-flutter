@@ -34,7 +34,6 @@ class MediaRepository {
   static const String region = 'PH';
 
   // Caches
-  final Map<String, List<CategoryRow>> _pageCache = {};
   final Map<String, MediaDetails> _detailsCache = {};
   final Map<String, Future<MediaDetails>> _detailsInflight = {};
   final Map<String, List<Episode>> _episodeCache = {};
@@ -73,89 +72,108 @@ class MediaRepository {
 
   // ---- Pages -------------------------------------------------------------
 
-  Future<List<CategoryRow>> homeRows() =>
-      _cachedPage('home', () async {
-        final results = await Future.wait([
-          _api.trendingAllWeek(),
-          _api.popularTv(),
-          _api.discoverMoviesByProvider(netflix, region),
-          _api.discoverTvByProvider(netflix, region),
-          _api.discoverMovies('99'), // Documentaries
-        ]);
-        final trending = _forRow(results[0]);
-        final popularSeries = _forRow(results[1]);
-        final netflixMovies = _tag(_withPosters(results[2]), 'movie');
-        final netflixTv = _tag(_withPosters(results[3]), 'tv');
-        final netflixRow = _interleave(netflixMovies, netflixTv);
-        final docs = _forRow(results[4]);
+  List<CategorySource> homeSources() => [
+        CategorySource(
+          title: 'Trending Now',
+          fallbackType: 'movie',
+          load: () async => _forRow(await _api.trendingAllWeek()),
+        ),
+        CategorySource(
+          title: 'Popular Series',
+          fallbackType: 'tv',
+          load: () async => _forRow(await _api.popularTv()),
+        ),
+        CategorySource(
+          title: 'Popular on Netflix Philippines',
+          fallbackType: 'movie',
+          load: () async {
+            final results = await Future.wait([
+              _api.discoverMoviesByProvider(netflix, region),
+              _api.discoverTvByProvider(netflix, region),
+            ]);
+            return _interleave(
+              _tag(_withPosters(results[0]), 'movie'),
+              _tag(_withPosters(results[1]), 'tv'),
+            );
+          },
+        ),
+        CategorySource(
+          title: 'Documentaries',
+          fallbackType: 'movie',
+          load: () async => _forRow(await _api.discoverMovies('99')),
+        ),
+      ];
 
-        return _nonEmpty([
-          CategoryRow(title: 'Trending Now', fallbackType: 'movie', items: trending),
-          CategoryRow(title: 'Popular Series', fallbackType: 'tv', items: popularSeries),
-          CategoryRow(
-            title: 'Popular on Netflix Philippines',
-            fallbackType: 'movie',
-            items: netflixRow,
-          ),
-          CategoryRow(title: 'Documentaries', fallbackType: 'movie', items: docs),
-        ]);
-      });
+  List<CategorySource> movieSources() => [
+        CategorySource(
+          title: 'Now Playing',
+          fallbackType: 'movie',
+          load: () async => _forRow(await _api.nowPlayingMovies()),
+        ),
+        CategorySource(
+          title: 'Popular',
+          fallbackType: 'movie',
+          load: () async => _forRow(await _api.popularMovies()),
+        ),
+        CategorySource(
+          title: 'Top Rated',
+          fallbackType: 'movie',
+          load: () async => _forRow(await _api.topRatedMovies()),
+        ),
+        CategorySource(
+          title: 'Action',
+          fallbackType: 'movie',
+          load: () async => _forRow(await _api.discoverMovies('28')),
+        ),
+        CategorySource(
+          title: 'Comedy',
+          fallbackType: 'movie',
+          load: () async => _forRow(await _api.discoverMovies('35')),
+        ),
+        CategorySource(
+          title: 'Horror',
+          fallbackType: 'movie',
+          load: () async => _forRow(await _api.discoverMovies('27')),
+        ),
+        CategorySource(
+          title: 'Animation',
+          fallbackType: 'movie',
+          load: () async => _forRow(await _api.discoverMovies('16')),
+        ),
+      ];
 
-  Future<List<CategoryRow>> movieRows() =>
-      _cachedPage('movies', () async {
-        final results = await Future.wait([
-          _api.nowPlayingMovies(),
-          _api.popularMovies(),
-          _api.topRatedMovies(),
-          _api.discoverMovies('28'), // Action
-          _api.discoverMovies('35'), // Comedy
-          _api.discoverMovies('27'), // Horror
-          _api.discoverMovies('16'), // Animation
-        ]);
-        return _nonEmpty([
-          CategoryRow(title: 'Now Playing', fallbackType: 'movie', items: _forRow(results[0])),
-          CategoryRow(title: 'Popular', fallbackType: 'movie', items: _forRow(results[1])),
-          CategoryRow(title: 'Top Rated', fallbackType: 'movie', items: _forRow(results[2])),
-          CategoryRow(title: 'Action', fallbackType: 'movie', items: _forRow(results[3])),
-          CategoryRow(title: 'Comedy', fallbackType: 'movie', items: _forRow(results[4])),
-          CategoryRow(title: 'Horror', fallbackType: 'movie', items: _forRow(results[5])),
-          CategoryRow(title: 'Animation', fallbackType: 'movie', items: _forRow(results[6])),
-        ]);
-      });
-
-  Future<List<CategoryRow>> seriesRows() =>
-      _cachedPage('series', () async {
-        final results = await Future.wait([
-          _api.popularTv(),
-          _api.topRatedTv(),
-          _api.discoverTv('35'), // Comedy
-          _api.discoverTv('10765'), // Sci-Fi & Fantasy
-          _api.discoverTv('16'), // Animation
-          _api.discoverTv('99'), // Documentary
-        ]);
-        return _nonEmpty([
-          CategoryRow(title: 'Popular', fallbackType: 'tv', items: _forRow(results[0])),
-          CategoryRow(title: 'Top Rated', fallbackType: 'tv', items: _forRow(results[1])),
-          CategoryRow(title: 'Comedy', fallbackType: 'tv', items: _forRow(results[2])),
-          CategoryRow(title: 'Sci-Fi & Fantasy', fallbackType: 'tv', items: _forRow(results[3])),
-          CategoryRow(title: 'Animation', fallbackType: 'tv', items: _forRow(results[4])),
-          CategoryRow(title: 'Documentary', fallbackType: 'tv', items: _forRow(results[5])),
-        ]);
-      });
-
-  List<CategoryRow> _nonEmpty(List<CategoryRow> rows) =>
-      rows.where((r) => r.items.isNotEmpty).toList();
-
-  Future<List<CategoryRow>> _cachedPage(
-    String key,
-    Future<List<CategoryRow>> Function() build,
-  ) async {
-    final cached = _pageCache[key];
-    if (cached != null) return cached;
-    final rows = await build();
-    _pageCache[key] = rows;
-    return rows;
-  }
+  List<CategorySource> seriesSources() => [
+        CategorySource(
+          title: 'Popular',
+          fallbackType: 'tv',
+          load: () async => _forRow(await _api.popularTv()),
+        ),
+        CategorySource(
+          title: 'Top Rated',
+          fallbackType: 'tv',
+          load: () async => _forRow(await _api.topRatedTv()),
+        ),
+        CategorySource(
+          title: 'Comedy',
+          fallbackType: 'tv',
+          load: () async => _forRow(await _api.discoverTv('35')),
+        ),
+        CategorySource(
+          title: 'Sci-Fi & Fantasy',
+          fallbackType: 'tv',
+          load: () async => _forRow(await _api.discoverTv('10765')),
+        ),
+        CategorySource(
+          title: 'Animation',
+          fallbackType: 'tv',
+          load: () async => _forRow(await _api.discoverTv('16')),
+        ),
+        CategorySource(
+          title: 'Documentary',
+          fallbackType: 'tv',
+          load: () async => _forRow(await _api.discoverTv('99')),
+        ),
+      ];
 
   /// Official posters for the title. Empty when TMDB has none.
   Future<List<String>> gallery(String type, int id) async {
@@ -459,38 +477,38 @@ class MediaRepository {
     return ranked;
   }
 
-  /// Continue-watching entries, enriched with title/poster from cached details.
+  /// Continue-watching entries already stored on the device.
   ///
   /// Includes in-progress items, every TV series you've started (a finished
   /// episode advances the record to the next one — the series stays here), and
   /// fully-watched movies/series. `all()` already sorts completed titles to the
   /// end, so completed items sink to the bottom instead of disappearing.
+  /// Posters are filled in later, and only for the titles on screen.
   Future<List<WatchProgress>> continueWatching() async {
-    final progs = WatchProgressStore.all()
+    return WatchProgressStore.all()
         .where((p) => p.completed || p.isResumable || p.type == 'tv')
         .toList();
-    // Some records store a backdrop in posterPath. A lite details call
-    // replaces it with the real poster and skips cast, videos, and the
-    // Coming Soon lookups. A few at a time, so a long list doesn't stampede.
-    return _mapLimited(progs, (p) async {
-      if (p.posterChecked && (p.posterPath?.isNotEmpty ?? false)) return p;
+  }
+
+  /// Replaces a backdrop stored as a poster. Only the titles passed in are
+  /// looked up, so a long Continue Watching list does not hit every record.
+  Future<void> enrichPosters(List<WatchProgress> visible) {
+    final need = [
+      for (final p in visible)
+        if (!p.posterChecked || (p.posterPath?.isEmpty ?? true)) p,
+    ];
+    return _mapLimited(need, (p) async {
       try {
         final d = await details(p.type, p.tmdbId, extras: false);
-        final fixed = p.copyWith(
+        WatchProgressStore.save(p.copyWith(
           title: (p.title?.isNotEmpty ?? false) ? p.title : d.title,
-          // d.posterPath is the titled poster; only fall back to the stored
-          // path when TMDB has none, so we never drop the image entirely.
           posterPath: (d.posterPath?.isNotEmpty ?? false)
               ? d.posterPath
               : p.posterPath,
           posterChecked: true,
-        );
-        WatchProgressStore.save(fixed);
-        return fixed;
-      } catch (_) {
-        // Never drop a continuable entry just because details failed.
-        return p;
-      }
+        ));
+      } catch (_) {}
+      return p;
     });
   }
 }

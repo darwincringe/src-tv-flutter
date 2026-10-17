@@ -3,9 +3,11 @@ import 'dart:ui' show ImageFilter;
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/focus.dart';
 import '../../core/theme.dart';
+import '../../data/repository/media_repository.dart';
 import '../../data/store/watch_progress.dart';
 import 'poster_card.dart';
 import 'watched_check.dart';
@@ -115,6 +117,7 @@ class PagedPosterGrid extends StatefulWidget {
     this.rows = 3,
     this.step = 5,
     this.firstItemFocusNode,
+    this.onVisible,
   });
 
   final int itemCount;
@@ -128,6 +131,9 @@ class PagedPosterGrid extends StatefulWidget {
   final int rows;
   final int step;
   final FocusNode? firstItemFocusNode;
+
+  /// Called with the posters actually on screen, including after See more.
+  final void Function(int start, int shown)? onVisible;
 
   @override
   State<PagedPosterGrid> createState() => _PagedPosterGridState();
@@ -158,6 +164,9 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
   final FocusNode _beginFocus = FocusNode(debugLabel: 'see-more-begin');
   final FocusNode _endFocus = FocusNode(debugLabel: 'see-more-end');
   final FocusNode _leadFocus = FocusNode(debugLabel: 'paged-lead');
+  int? _visibleStart;
+  int? _visibleShown;
+  bool _visibleQueued = false;
 
   @override
   void initState() {
@@ -198,6 +207,7 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
     if (_animating) return;
     _forward = forward;
     _pendingStart = next;
+    _noteVisible(next, total, capacity);
     _pendingFocus = forward && !nextPage.canForward
         ? _beginFocus
         : !forward && !nextPage.canBack
@@ -224,6 +234,21 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
     });
   }
 
+  void _noteVisible(int start, int total, int capacity) {
+    if (widget.onVisible == null || total <= 0 || capacity <= 0) return;
+    final page = posterWindow(start: start, total: total, capacity: capacity);
+    if (_visibleStart == page.start && _visibleShown == page.shown) return;
+    _visibleStart = page.start;
+    _visibleShown = page.shown;
+    if (_visibleQueued) return;
+    _visibleQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _visibleQueued = false;
+      if (!mounted || _visibleStart == null || _visibleShown == null) return;
+      widget.onVisible!(_visibleStart!, _visibleShown!);
+    });
+  }
+
   void _restoreFocus() {
     final node = _pendingFocus;
     _pendingFocus = null;
@@ -243,6 +268,11 @@ class _PagedPosterGridState extends State<PagedPosterGrid>
         final cols = math.max(1, (width / (_extent + _gap)).ceil());
         final capacity = cols * widget.rows;
         final total = widget.itemCount;
+        _noteVisible(
+          _animating ? (_pendingStart ?? _start) : _start,
+          total,
+          capacity,
+        );
         return AnimatedBuilder(
           animation: _slide,
           builder: (context, _) {
@@ -533,7 +563,7 @@ class SeeMorePoster extends StatelessWidget {
 
 /// Continue Watching. Home uses one row; My Library keeps three. See more
 /// shifts five titles so the row never grows.
-class ContinueWatchingRow extends StatelessWidget {
+class ContinueWatchingRow extends ConsumerStatefulWidget {
   const ContinueWatchingRow({
     super.key,
     required this.title,
@@ -558,16 +588,42 @@ class ContinueWatchingRow extends StatelessWidget {
   final int rows;
 
   @override
+  ConsumerState<ContinueWatchingRow> createState() =>
+      _ContinueWatchingRowState();
+}
+
+class _ContinueWatchingRowState extends ConsumerState<ContinueWatchingRow> {
+  final Set<String> _busy = {};
+
+  void _loadVisible(int start, int shown) {
+    if (shown <= 0 || start >= widget.items.length) return;
+    final end = math.min(widget.items.length, start + shown);
+    final fresh = <WatchProgress>[];
+    for (var i = start; i < end; i++) {
+      final p = widget.items[i];
+      if (p.posterChecked && (p.posterPath?.isNotEmpty ?? false)) continue;
+      final key = '${p.type}-${p.tmdbId}';
+      if (_busy.add(key)) fresh.add(p);
+    }
+    if (fresh.isEmpty) return;
+    ref.read(mediaRepositoryProvider).enrichPosters(fresh).whenComplete(() {
+      for (final p in fresh) {
+        _busy.remove('${p.type}-${p.tmdbId}');
+      }
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: padding,
+      padding: widget.padding,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
             padding: const EdgeInsets.only(bottom: 6),
             child: Text(
-              title,
+              widget.title,
               style: const TextStyle(
                 color: AppColors.textPrimary,
                 fontSize: 18,
@@ -576,20 +632,21 @@ class ContinueWatchingRow extends StatelessWidget {
             ),
           ),
           PagedPosterGrid(
-            itemCount: items.length,
-            rows: rows,
-            firstItemFocusNode: firstItemFocusNode,
-            posterPath: (index) => items[index].posterPath,
+            itemCount: widget.items.length,
+            rows: widget.rows,
+            firstItemFocusNode: widget.firstItemFocusNode,
+            onVisible: _loadVisible,
+            posterPath: (index) => widget.items[index].posterPath,
             itemBuilder: (context, index, lead, focusNode) {
-              final p = items[index];
+              final p = widget.items[index];
               return _ContinueWatchingCard(
                 progress: p,
-                autofocus: lead && autofocusFirst,
+                autofocus: lead && widget.autofocusFirst,
                 focusNode: focusNode,
                 onFocusChange: (f) {
-                  if (f) onFocus?.call(p);
+                  if (f) widget.onFocus?.call(p);
                 },
-                onTap: () => onTap(p),
+                onTap: () => widget.onTap(p),
               );
             },
           ),

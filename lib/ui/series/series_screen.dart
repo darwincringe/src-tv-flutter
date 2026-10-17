@@ -9,7 +9,7 @@ class SeriesScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return MediaBrowseScreen(
       scope: 'tv',
-      loadRows: (repo) => repo.seriesRows(),
+      loadRows: (repo) => repo.seriesSources(),
     );
   }
 }

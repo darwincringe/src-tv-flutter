@@ -10,7 +10,7 @@ class HomeScreen extends StatelessWidget {
     return MediaBrowseScreen(
       scope: 'home',
       showContinueWatching: true,
-      loadRows: (repo) => repo.homeRows(),
+      loadRows: (repo) => repo.homeSources(),
     );
   }
 }

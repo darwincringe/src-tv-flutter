@@ -35,8 +35,6 @@ class DetailsScreen extends ConsumerStatefulWidget {
 class _DetailsScreenState extends ConsumerState<DetailsScreen>
     with WidgetsBindingObserver {
   MediaDetails? _details;
-  List<MediaItem> _similar = [];
-  List<String> _gallery = [];
   Object? _error;
 
   int _selectedSeason = 1;
@@ -108,8 +106,6 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
     super.didUpdateWidget(oldWidget);
     if (oldWidget.id != widget.id || oldWidget.mediaType != widget.mediaType) {
       _details = null;
-      _similar = [];
-      _gallery = [];
       _episodes = [];
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _load();
@@ -122,18 +118,9 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
     try {
       final repo = ref.read(mediaRepositoryProvider);
       final d = await repo.details(widget.mediaType, widget.id);
-      final sim = await repo.similar(widget.mediaType, widget.id);
-      List<String> gallery = const [];
-      try {
-        gallery = await repo.gallery(widget.mediaType, widget.id);
-      } catch (_) {
-        gallery = const [];
-      }
       if (!mounted) return;
       setState(() {
         _details = d;
-        _similar = sim;
-        _gallery = gallery;
         _progress = WatchProgressStore.get(_progressType, widget.id);
         if (d.isTv && d.seasons.isNotEmpty) {
           _selectedSeason = d.seasons.first.seasonNumber;
@@ -235,22 +222,42 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
 
     final portrait = MediaQuery.of(context).orientation == Orientation.portrait;
 
+    final tiles = <Widget>[
+      _header(d, portrait),
+      if (d.cast.isNotEmpty) _castSection(d),
+      if (d.isTv && d.seasons.isNotEmpty) _seasonsSection(d),
+      _Deferred<List<String>>(
+        key: ValueKey('gallery-${widget.mediaType}-${widget.id}'),
+        load: () => ref.read(mediaRepositoryProvider).gallery(
+              widget.mediaType,
+              widget.id,
+            ),
+        builder: (paths) =>
+            paths.isEmpty ? const SizedBox.shrink() : _gallerySection(paths),
+      ),
+      _Deferred<List<MediaItem>>(
+        key: ValueKey('similar-${widget.mediaType}-${widget.id}'),
+        load: () => ref.read(mediaRepositoryProvider).similar(
+              widget.mediaType,
+              widget.id,
+            ),
+        builder: (items) => items.isEmpty
+            ? const SizedBox.shrink()
+            : _moreLikeThis(portrait, items),
+      ),
+    ];
+
     return Scaffold(
       backgroundColor: AppColors.charcoal,
       body: Stack(
         children: [
           Positioned.fill(child: _DetailsBackdrop(path: d.backdropPath)),
           SafeArea(
-            child: ListView(
+            child: ListView.builder(
               controller: _scroll,
               padding: const EdgeInsets.only(bottom: 40),
-              children: [
-                _header(d, portrait),
-                if (d.cast.isNotEmpty) _castSection(d),
-                if (d.isTv && d.seasons.isNotEmpty) _seasonsSection(d),
-                if (_gallery.isNotEmpty) _gallerySection(),
-                if (_similar.isNotEmpty) _moreLikeThis(portrait),
-              ],
+              itemCount: tiles.length,
+              itemBuilder: (context, index) => tiles[index],
             ),
           ),
           Positioned(
@@ -522,7 +529,7 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
 
   // ---- Gallery -----------------------------------------------------------
 
-  Widget _gallerySection() {
+  Widget _gallerySection(List<String> paths) {
     return Padding(
       padding: const EdgeInsets.only(top: 24),
       child: Column(
@@ -545,9 +552,9 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
               scrollDirection: Axis.horizontal,
               clipBehavior: Clip.none,
               padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 6),
-              itemCount: _gallery.length,
+              itemCount: paths.length,
               separatorBuilder: (_, _) => const SizedBox(width: 12),
-              itemBuilder: (context, i) => _GalleryCard(path: _gallery[i]),
+              itemBuilder: (context, i) => _GalleryCard(path: paths[i]),
             ),
           ),
         ],
@@ -557,7 +564,7 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
 
   // ---- More like this ----------------------------------------------------
 
-  Widget _moreLikeThis(bool portrait) {
+  Widget _moreLikeThis(bool portrait, List<MediaItem> similar) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(40, 24, 40, 0),
       child: Column(
@@ -575,7 +582,7 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
             ),
           ),
           SlidingWindow(
-            itemCount: _similar.length,
+            itemCount: similar.length,
             columns: portrait ? 2 : 3,
             rows: 2,
             initialTitles: 5,
@@ -584,9 +591,9 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
             gap: 16,
             cardAspect: 16 / 9,
             extraHeight: 120,
-            imageUrl: (i) => cardBackdropUrl(_similar[i].backdropPath),
+            imageUrl: (i) => cardBackdropUrl(similar[i].backdropPath),
             itemBuilder: (context, i, lead, focusNode) {
-              final item = _similar[i];
+              final item = similar[i];
               return _SimilarCard(
                 item: item,
                 focusNode: focusNode,
@@ -1207,5 +1214,47 @@ class _SimilarCard extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+/// Loads [load] when this section is built, which is when it scrolls on screen.
+class _Deferred<T> extends StatefulWidget {
+  const _Deferred({
+    super.key,
+    required this.load,
+    required this.builder,
+  });
+
+  final Future<T> Function() load;
+  final Widget Function(T data) builder;
+
+  @override
+  State<_Deferred<T>> createState() => _DeferredState<T>();
+}
+
+class _DeferredState<T> extends State<_Deferred<T>> {
+  T? _data;
+  bool _failed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _run();
+  }
+
+  Future<void> _run() async {
+    try {
+      final data = await widget.load();
+      if (mounted) setState(() => _data = data);
+    } catch (_) {
+      if (mounted) setState(() => _failed = true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final data = _data;
+    if (_failed || data == null) return const SizedBox.shrink();
+    return widget.builder(data);
   }
 }

@@ -28,7 +28,7 @@ class MediaBrowseScreen extends ConsumerStatefulWidget {
   });
 
   final String scope;
-  final Future<List<CategoryRow>> Function(MediaRepository repo) loadRows;
+  final List<CategorySource> Function(MediaRepository repo) loadRows;
   final bool showContinueWatching;
 
   @override
@@ -37,10 +37,10 @@ class MediaBrowseScreen extends ConsumerStatefulWidget {
 
 class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
     with WidgetsBindingObserver {
-  List<CategoryRow>? _rows;
-  List<MediaItem> _recommended = [];
+  List<CategorySource>? _sources;
   List<WatchProgress> _continueWatching = [];
   bool _personalizedReady = false;
+  bool _recommendedEmpty = false;
   Object? _error;
   MediaItem? _hero;
   // Rich details for the focused hero (year/rating/runtime/language/genres),
@@ -62,7 +62,6 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
     // on returning from the player (in-app navigation, which is NOT an app
     // resume) so the row updates immediately after watching something.
     WatchProgressStore.revision.addListener(_onAccountData);
-    RecommendationSeeds.revision.addListener(_onAccountData);
   }
 
   bool _activated = false;
@@ -81,19 +80,18 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     WatchProgressStore.revision.removeListener(_onAccountData);
-    RecommendationSeeds.revision.removeListener(_onAccountData);
     _heroDebounce?.cancel();
     _firstCardFocus.dispose();
     super.dispose();
   }
 
   void _onAccountData() {
-    if (mounted && _activated && _rows != null) _loadPersonalized();
+    if (mounted && _activated && _sources != null) _loadPersonalized();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && _activated && _rows != null) {
+    if (state == AppLifecycleState.resumed && _activated && _sources != null) {
       _loadPersonalized();
     }
   }
@@ -104,15 +102,16 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
     });
     try {
       final repo = ref.read(mediaRepositoryProvider);
-      final rows = await widget.loadRows(repo);
+      final sources = widget.loadRows(repo);
+      final cw = widget.showContinueWatching
+          ? await repo.continueWatching()
+          : <WatchProgress>[];
       if (!mounted) return;
       setState(() {
-        _rows = rows;
-        _hero ??= rows.isNotEmpty && rows.first.items.isNotEmpty
-            ? rows.first.items.first
-            : null;
+        _sources = sources;
+        _continueWatching = cw;
+        _personalizedReady = true;
       });
-      await _loadPersonalized();
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = e);
@@ -123,13 +122,11 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
     final gen = ++_personalGen;
     try {
       final repo = ref.read(mediaRepositoryProvider);
-      final rec = await repo.recommended(widget.scope);
       final cw = widget.showContinueWatching
           ? await repo.continueWatching()
           : <WatchProgress>[];
       if (!mounted || gen != _personalGen) return;
       setState(() {
-        _recommended = rec;
         _continueWatching = cw;
         _personalizedReady = true;
       });
@@ -195,7 +192,7 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
     if (_error != null) {
       return ErrorView(message: 'Something went wrong.', onRetry: _load);
     }
-    if (_rows == null || !_personalizedReady) {
+    if (_sources == null || !_personalizedReady) {
       // Home's first load is the app's cold-start — show the full branded
       // splash (logo + spinner + caption), handing off from the native splash.
       return widget.scope == 'home'
@@ -254,36 +251,42 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
       focusAssigned = true;
     }
 
-    if (_recommended.isNotEmpty) {
-      sections.add(CategoryRowSection(
-        row: CategoryRow(
-          title: 'Recommended for you',
-          fallbackType: widget.scope == 'tv' ? 'tv' : 'movie',
-          items: _recommended,
-        ),
-        autofocusFirst: !focusAssigned,
-        firstItemFocusNode: focusAssigned ? null : _firstCardFocus,
-        onItemFocus: (item) =>
-            _focusHeroItem(item, widget.scope == 'tv' ? 'tv' : 'movie'),
-        onItemTap: (item) => openDetails(
-          context,
-          item.resolvedType(widget.scope == 'tv' ? 'tv' : 'movie'),
-          item.id,
-        ),
-      ));
-      focusAssigned = true;
-    }
+    final fallback = widget.scope == 'tv' ? 'tv' : 'movie';
+    sections.add(_LazyRecommended(
+      key: ValueKey('recommended-${widget.scope}'),
+      scope: widget.scope,
+      autofocusFirst: !focusAssigned,
+      firstItemFocusNode: focusAssigned ? null : _firstCardFocus,
+      onEmpty: () {
+        if (mounted && !_recommendedEmpty) {
+          setState(() => _recommendedEmpty = true);
+        }
+      },
+      onItems: _claimHero,
+      onItemFocus: (item) => _focusHeroItem(item, fallback),
+      onItemTap: (item) => openDetails(
+        context,
+        item.resolvedType(fallback),
+        item.id,
+      ),
+    ));
+    if (!_recommendedEmpty) focusAssigned = true;
 
-    for (var i = 0; i < _rows!.length; i++) {
-      final row = _rows![i];
+    for (var i = 0; i < _sources!.length; i++) {
+      final source = _sources![i];
       final assignFocus = !focusAssigned && i == 0;
-      sections.add(CategoryRowSection(
-        row: row,
+      sections.add(LazyCategoryRow(
+        key: ValueKey('${widget.scope}-${source.title}'),
+        source: source,
         autofocusFirst: assignFocus,
         firstItemFocusNode: assignFocus ? _firstCardFocus : null,
-        onItemFocus: (item) => _focusHeroItem(item, row.fallbackType),
-        onItemTap: (item) =>
-            openDetails(context, item.resolvedType(row.fallbackType), item.id),
+        onItems: assignFocus ? _claimHero : null,
+        onItemFocus: (item) => _focusHeroItem(item, source.fallbackType),
+        onItemTap: (item) => openDetails(
+          context,
+          item.resolvedType(source.fallbackType),
+          item.id,
+        ),
       ));
       if (assignFocus) focusAssigned = true;
     }
@@ -293,6 +296,91 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
       itemCount: sections.length,
       separatorBuilder: (_, _) => const SizedBox(height: 8),
       itemBuilder: (context, index) => sections[index],
+    );
+  }
+
+  void _claimHero(List<MediaItem> items) {
+    if (_hero != null || items.isEmpty || !mounted) return;
+    setState(() => _hero = items.first);
+  }
+}
+
+/// Recommendations load when this row is on screen, not with the rest of the page.
+class _LazyRecommended extends ConsumerStatefulWidget {
+  const _LazyRecommended({
+    super.key,
+    required this.scope,
+    required this.onItemTap,
+    required this.onItemFocus,
+    required this.onEmpty,
+    this.onItems,
+    this.firstItemFocusNode,
+    this.autofocusFirst = false,
+  });
+
+  final String scope;
+  final void Function(MediaItem item) onItemTap;
+  final void Function(MediaItem item) onItemFocus;
+  final VoidCallback onEmpty;
+  final void Function(List<MediaItem> items)? onItems;
+  final FocusNode? firstItemFocusNode;
+  final bool autofocusFirst;
+
+  @override
+  ConsumerState<_LazyRecommended> createState() => _LazyRecommendedState();
+}
+
+class _LazyRecommendedState extends ConsumerState<_LazyRecommended> {
+  List<MediaItem>? _items;
+  int _gen = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    RecommendationSeeds.revision.addListener(_load);
+    _load();
+  }
+
+  @override
+  void dispose() {
+    RecommendationSeeds.revision.removeListener(_load);
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    final gen = ++_gen;
+    try {
+      final items =
+          await ref.read(mediaRepositoryProvider).recommended(widget.scope);
+      if (!mounted || gen != _gen) return;
+      setState(() => _items = items);
+      if (items.isEmpty) {
+        widget.onEmpty();
+      } else {
+        widget.onItems?.call(items);
+      }
+    } catch (_) {
+      if (!mounted || gen != _gen) return;
+      setState(() => _items = const []);
+      widget.onEmpty();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final items = _items;
+    if (items == null || items.isEmpty) return const SizedBox.shrink();
+    final fallback = widget.scope == 'tv' ? 'tv' : 'movie';
+    return CategoryRowSection(
+      row: CategoryRow(
+        title: 'Recommended for you',
+        fallbackType: fallback,
+        items: items,
+      ),
+      autofocusFirst: widget.autofocusFirst,
+      firstItemFocusNode: widget.firstItemFocusNode,
+      onItemFocus: widget.onItemFocus,
+      onItemTap: widget.onItemTap,
     );
   }
 }

@@ -29,6 +29,16 @@ class CategoryRowSection extends StatefulWidget {
 }
 
 class _CategoryRowSectionState extends State<CategoryRowSection> {
+  @override
+  void didUpdateWidget(CategoryRowSection oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.autofocusFirst && !oldWidget.autofocusFirst) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) widget.firstItemFocusNode?.requestFocus();
+      });
+    }
+  }
+
   // When a card in this row gains focus, scroll the whole section (title + row)
   // into view vertically so the title is never clipped and the row snaps near
   // the top of the list — this is what makes D-pad up/down navigation land
@@ -98,6 +108,67 @@ class _CategoryRowSectionState extends State<CategoryRowSection> {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Fetches [source] when this row is built, which is when it is on screen.
+class LazyCategoryRow extends StatefulWidget {
+  const LazyCategoryRow({
+    super.key,
+    required this.source,
+    required this.onItemTap,
+    this.onItemFocus,
+    this.onItems,
+    this.firstItemFocusNode,
+    this.autofocusFirst = false,
+  });
+
+  final CategorySource source;
+  final void Function(MediaItem item) onItemTap;
+  final void Function(MediaItem item)? onItemFocus;
+  final void Function(List<MediaItem> items)? onItems;
+  final FocusNode? firstItemFocusNode;
+  final bool autofocusFirst;
+
+  @override
+  State<LazyCategoryRow> createState() => _LazyCategoryRowState();
+}
+
+class _LazyCategoryRowState extends State<LazyCategoryRow> {
+  List<MediaItem>? _items;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final items = await widget.source.fetch();
+      if (!mounted) return;
+      setState(() => _items = items);
+      if (items.isNotEmpty) widget.onItems?.call(items);
+    } catch (_) {
+      if (mounted) setState(() => _items = const []);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final items = _items;
+    if (items == null || items.isEmpty) return const SizedBox.shrink();
+    return CategoryRowSection(
+      row: CategoryRow(
+        title: widget.source.title,
+        fallbackType: widget.source.fallbackType,
+        items: items,
+      ),
+      autofocusFirst: widget.autofocusFirst,
+      firstItemFocusNode: widget.firstItemFocusNode,
+      onItemFocus: widget.onItemFocus,
+      onItemTap: widget.onItemTap,
     );
   }
 }

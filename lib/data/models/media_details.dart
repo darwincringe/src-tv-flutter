@@ -64,3 +64,19 @@ class CategoryRow {
     required this.items,
   });
 }
+
+/// A category whose titles are fetched the first time the row is on screen.
+class CategorySource {
+  CategorySource({
+    required this.title,
+    required this.fallbackType,
+    required this.load,
+  });
+
+  final String title;
+  final String fallbackType;
+  final Future<List<MediaItem>> Function() load;
+  Future<List<MediaItem>>? _pending;
+
+  Future<List<MediaItem>> fetch() => _pending ??= load();
+}
