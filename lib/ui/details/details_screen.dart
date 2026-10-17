@@ -1,3 +1,5 @@
+import 'dart:ui' show ImageFilter;
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -16,6 +18,7 @@ import '../../data/store/watch_progress.dart';
 import '../../data/tmdb/image_urls.dart';
 import '../player/player_args.dart';
 import '../widgets/coming_soon_badge.dart';
+import '../widgets/episode_window.dart';
 import '../widgets/sliding_window.dart';
 import '../widgets/state_views.dart';
 import '../widgets/watched_check.dart';
@@ -480,16 +483,10 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
           else
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 40),
-              child: SlidingWindow(
+              child: EpisodeWindow(
                 key: ValueKey(_selectedSeason),
-                vertical: true,
-                rows: 6,
-                step: 5,
-                gap: 12,
-                rowExtent: 116,
                 itemCount: _episodes.length,
                 firstItemFocusNode: _firstEpisodeFocus,
-                imageUrl: (i) => stillUrl(_episodes[i].stillPath),
                 itemBuilder: (context, i, lead, focusNode) {
                   final ep = _episodes[i];
                   return _EpisodeRow(
@@ -508,6 +505,11 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
                     ),
                   );
                 },
+                seeMoreBuilder: (context, i, focusNode, onTap) => _EpisodeSeeMore(
+                  episode: _episodes[i],
+                  focusNode: focusNode,
+                  onTap: onTap,
+                ),
               ),
             ),
         ],
@@ -1012,6 +1014,78 @@ class _EpisodeRow extends StatelessWidget {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Same shape as an episode row: the next still, a "See more" title, and no
+/// description. The picture is blurred so it is not another episode to play.
+class _EpisodeSeeMore extends StatelessWidget {
+  const _EpisodeSeeMore({
+    required this.episode,
+    required this.onTap,
+    required this.focusNode,
+  });
+
+  final Episode episode;
+  final VoidCallback onTap;
+  final FocusNode focusNode;
+
+  @override
+  Widget build(BuildContext context) {
+    final still = stillUrl(episode.stillPath);
+    return FocusableCard(
+      onTap: onTap,
+      focusNode: focusNode,
+      focusedScale: 1.02,
+      ensureVisibleOnFocus: true,
+      borderRadius: BorderRadius.circular(6),
+      child: Padding(
+        padding: const EdgeInsets.all(8),
+        child: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: SizedBox(
+                width: 150,
+                height: 84,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    if (still != null)
+                      ImageFiltered(
+                        imageFilter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
+                        child: Transform.scale(
+                          scale: 1.15,
+                          child: CachedNetworkImage(
+                            imageUrl: still,
+                            fit: BoxFit.cover,
+                            width: 150,
+                            height: 84,
+                            memCacheWidth: (150 *
+                                    MediaQuery.devicePixelRatioOf(context))
+                                .round(),
+                          ),
+                        ),
+                      )
+                    else
+                      const ColoredBox(color: AppColors.charcoal),
+                    const ColoredBox(color: Color(0x99000000)),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            const Text(
+              'See more',
+              style: TextStyle(
+                color: AppColors.textPrimary,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
         ),
       ),
     );
