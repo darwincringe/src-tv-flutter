@@ -9,6 +9,7 @@ import 'data/store/active_playback.dart';
 import 'data/store/library_store.dart';
 import 'data/store/mirror_pref.dart';
 import 'data/store/recommendation_seeds.dart';
+import 'data/store/saved_subtitle.dart';
 import 'data/store/subtitle_pref.dart';
 import 'data/store/watch_progress.dart';
 import 'data/sync/sync_service.dart';
@@ -29,6 +30,7 @@ Future<void> main() async {
   await ActivePlayback.init();
   await RecommendationSeeds.init();
   await SubtitlePrefStore.init();
+  await SavedSubtitleStore.init();
   await MirrorPrefStore.init();
   await SoundPrefStore.init();
   await AuthService.init();

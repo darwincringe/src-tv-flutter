@@ -19,7 +19,9 @@ import '../../data/introdb/introdb_client.dart';
 import '../../data/models/details_dto.dart';
 import '../../data/repository/media_repository.dart';
 import '../../data/store/mirror_pref.dart';
+import '../../data/store/saved_subtitle.dart';
 import '../../data/store/subtitle_pref.dart';
+import '../../data/subtitle/subtitle_search.dart';
 import '../../data/store/watch_progress.dart';
 import '../../data/stream/extract_response.dart';
 import '../../data/stream/mirror_choice.dart';
@@ -30,6 +32,7 @@ import 'sound_boost.dart';
 import 'sound_pref.dart';
 import 'subtitle_config.dart';
 import 'subtitle_parser.dart';
+import 'subtitle_search_dialog.dart';
 import 'subtitle_sync.dart';
 
 // ---- hls.js interop (bundled in web/hls.min.js, loaded from index.html) -----
@@ -318,7 +321,9 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
       _computeEpisodeRefs();
       _resumeTargetMs = _savedResumePosition();
       _resumeDone = _resumeTargetMs <= 0;
-      _subs = [...apiSubtitleOptions(res.subtitles), ..._uploaded];
+      _subs = _withSavedSubtitle(
+        [...apiSubtitleOptions(res.subtitles), ..._uploaded],
+      );
       // Apply the remembered choice (per-season for TV / per-title for movies),
       // else default to English. Not saved — only user picks persist.
       _selectSubtitle(_initialSubtitleIndex(), save: false);
@@ -665,6 +670,72 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   // ---- subtitles ---------------------------------------------------------
+  List<SubtitleOption> _withSavedSubtitle(List<SubtitleOption> subs) {
+    if (_a.tmdbId == null || _a.type == null) return subs;
+    final saved = SavedSubtitleStore.get(
+      _a.type!,
+      _a.tmdbId!,
+      _isTv ? _season : null,
+      _isTv ? _episode : null,
+    );
+    if (saved == null) return subs;
+    final uri = 'saved:${saved.fileId}';
+    _uploadedCues[uri] = parseSubtitles(saved.body);
+    return [
+      ...subs.where((s) => !s.uri.startsWith('saved:')),
+      SubtitleOption(uri: uri, label: saved.label, language: saved.language),
+    ];
+  }
+
+  Future<bool> _searchSubtitle() async {
+    final chosen = await showSubtitleSearchDialog(
+      context,
+      initialQuery: defaultSubtitleSearchText(
+        _title ?? '',
+        season: _isTv ? _season : null,
+        episode: _isTv ? _episode : null,
+      ),
+      title: _title ?? '',
+      tmdbId: _a.tmdbId ?? 0,
+      type: _a.type ?? 'movie',
+      season: _isTv ? _season : null,
+      episode: _isTv ? _episode : null,
+    );
+    if (chosen == null || !mounted || _a.type == null || _a.tmdbId == null) {
+      return false;
+    }
+    final cues = parseSubtitles(chosen.body);
+    if (cues.isEmpty) {
+      _snack('Couldn’t read any lines from that subtitle');
+      return false;
+    }
+    await SavedSubtitleStore.save(
+      _a.type!,
+      _a.tmdbId!,
+      _isTv ? _season : null,
+      _isTv ? _episode : null,
+      SavedSubtitle(
+        fileId: chosen.fileId,
+        label: chosen.label,
+        language: chosen.language,
+        body: chosen.body,
+      ),
+    );
+    final uri = 'saved:${chosen.fileId}';
+    _uploadedCues[uri] = cues;
+    final opt = SubtitleOption(
+      uri: uri,
+      label: chosen.label,
+      language: chosen.language,
+    );
+    setState(() {
+      _subs = [..._subs.where((s) => !s.uri.startsWith('saved:')), opt];
+    });
+    await _selectSubtitle(_subs.length - 1);
+    if (mounted) _snack('Subtitle saved for this title');
+    return true;
+  }
+
   /// The subtitle to start with: the remembered choice (SubtitlePrefStore —
   /// per-season for TV, per-title for movies), else the first English track,
   /// else off (-1).
@@ -1202,6 +1273,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
         note: _syncNote,
         onAutoSync: _setAutoSync,
         onUpload: _uploadSubtitle,
+        onSearch: _searchSubtitle,
       ),
     );
     if (picked != null) _selectSubtitle(picked - 1); // -1 = Off
@@ -1869,11 +1941,6 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
                   ),
                 ),
                 IconButton(
-                  onPressed: _uploadSubtitle,
-                  tooltip: 'Upload SRT',
-                  icon: const Icon(Icons.upload_file, color: Colors.white),
-                ),
-                IconButton(
                   onPressed: _toggleFullscreen,
                   tooltip: _fullscreen ? 'Exit full screen' : 'Full screen',
                   icon: Icon(
@@ -2024,6 +2091,7 @@ class _SubtitleMenu extends StatefulWidget {
     required this.note,
     required this.onAutoSync,
     required this.onUpload,
+    required this.onSearch,
   });
   final List<String> labels;
   final int current;
@@ -2031,6 +2099,7 @@ class _SubtitleMenu extends StatefulWidget {
   final ValueNotifier<String> note;
   final ValueChanged<bool> onAutoSync;
   final Future<bool> Function() onUpload;
+  final Future<bool> Function() onSearch;
 
   @override
   State<_SubtitleMenu> createState() => _SubtitleMenuState();
@@ -2089,6 +2158,14 @@ class _SubtitleMenuState extends State<_SubtitleMenu> {
                   selected: false,
                   onTap: () async {
                     final added = await widget.onUpload();
+                    if (added && context.mounted) Navigator.pop(context);
+                  },
+                ),
+                _MenuRow(
+                  label: 'Search SRT',
+                  selected: false,
+                  onTap: () async {
+                    final added = await widget.onSearch();
                     if (added && context.mounted) Navigator.pop(context);
                   },
                 ),

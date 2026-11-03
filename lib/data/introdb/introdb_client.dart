@@ -49,6 +49,8 @@ class IntroDbClient {
         options: Options(
           receiveTimeout: const Duration(seconds: 10),
           sendTimeout: const Duration(seconds: 10),
+          // The web proxy (/segments) requires the same Bearer as /extract.
+          headers: kIsWeb ? StreamClient.authHeaders() : null,
         ),
       );
       final data = resp.data;

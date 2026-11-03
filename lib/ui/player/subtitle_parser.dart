@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:dio/dio.dart';
 
+import '../../data/stream/stream_client.dart';
+
 // Byte read + gunzip live in a conditional-import sibling so `dart:io` never
 // reaches the web build.
 import 'subtitle_bytes_io.dart'
@@ -28,12 +30,18 @@ Future<List<SubtitleCue>> loadSubtitleCues(String uri, {String? userAgent}) asyn
   try {
     List<int> bytes;
     if (uri.startsWith('http')) {
+      final headers = <String, String>{
+        'User-Agent': ?userAgent,
+        // Subtitle proxies on our API require the same Bearer as /extract.
+        if (Uri.tryParse(uri)?.host == 'api.srctv.space')
+          ...StreamClient.authHeaders(),
+      };
       final resp = await Dio().get<List<int>>(
         uri,
         options: Options(
           responseType: ResponseType.bytes,
           followRedirects: true,
-          headers: userAgent != null ? {'User-Agent': userAgent} : null,
+          headers: headers.isEmpty ? null : headers,
           receiveTimeout: const Duration(seconds: 20),
           sendTimeout: const Duration(seconds: 20),
         ),

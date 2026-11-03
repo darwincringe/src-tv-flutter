@@ -1,7 +1,9 @@
 import 'package:flutter/foundation.dart' show kIsWeb;
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
+import '../data/auth/auth_service.dart';
+import '../ui/auth/access_dialogs.dart';
 import '../ui/player/player_args.dart';
 import 'history_stub.dart' if (dart.library.html) 'history_web.dart';
 import 'shell_return.dart';
@@ -64,6 +66,10 @@ void playStream(
   String? backdropPath,
   String? posterPath,
 }) {
+  if (!AuthService.canStream) {
+    showPremiumRequiredDialog(context);
+    return;
+  }
   _navTo(
     context,
     watchLocation(type: type, tmdbId: tmdbId, season: season, episode: episode),

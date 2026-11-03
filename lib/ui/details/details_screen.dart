@@ -8,6 +8,7 @@ import '../../core/dates.dart';
 import '../../core/focus.dart';
 import '../../core/navigation.dart';
 import '../../core/theme.dart';
+import '../../data/auth/auth_service.dart';
 import '../../data/models/credits.dart';
 import '../../data/models/details_dto.dart';
 import '../../data/models/media_details.dart';
@@ -60,6 +61,7 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
     WatchProgressStore.revision.addListener(_refreshProgress);
     // Keep the "Add to Library" toggle in sync if it changes elsewhere.
     LibraryStore.revision.addListener(_onLibraryChange);
+    AuthService.revision.addListener(_onLibraryChange);
     _load();
   }
 
@@ -68,6 +70,7 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
     WidgetsBinding.instance.removeObserver(this);
     WatchProgressStore.revision.removeListener(_refreshProgress);
     LibraryStore.revision.removeListener(_onLibraryChange);
+    AuthService.revision.removeListener(_onLibraryChange);
     _scroll.dispose();
     _playFocus.dispose();
     _firstEpisodeFocus.dispose();
@@ -321,18 +324,21 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
             const SizedBox(height: 16),
             Row(
               children: [
-                _PlayButton(
-                  label: _resumable ? 'Resume' : 'Play',
-                  icon: Icons.play_arrow,
-                  focusNode: _playFocus,
-                  autofocus: true,
-                  onTap: _onPlay,
-                ),
-                const SizedBox(width: 12),
+                if (AuthService.canStream) ...[
+                  _PlayButton(
+                    label: _resumable ? 'Resume' : 'Play',
+                    icon: Icons.play_arrow,
+                    focusNode: _playFocus,
+                    autofocus: true,
+                    onTap: _onPlay,
+                  ),
+                  const SizedBox(width: 12),
+                ],
                 _PlayButton(
                   label: 'Watch Trailer',
                   icon: Icons.movie_outlined,
                   filled: false,
+                  autofocus: !AuthService.canStream,
                   onTap: () {
                     final key = d.trailerKey;
                     if (key != null) {
@@ -344,16 +350,19 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
                     }
                   },
                 ),
-                const SizedBox(width: 12),
-                Builder(builder: (context) {
-                  final inLib = LibraryStore.contains(_progressType, widget.id);
-                  return _PlayButton(
-                    label: inLib ? 'In Library' : 'Add to Library',
-                    icon: inLib ? Icons.check : Icons.add,
-                    filled: false,
-                    onTap: _toggleLibrary,
-                  );
-                }),
+                if (AuthService.canStream) ...[
+                  const SizedBox(width: 12),
+                  Builder(builder: (context) {
+                    final inLib =
+                        LibraryStore.contains(_progressType, widget.id);
+                    return _PlayButton(
+                      label: inLib ? 'In Library' : 'Add to Library',
+                      icon: inLib ? Icons.check : Icons.add,
+                      filled: false,
+                      onTap: _toggleLibrary,
+                    );
+                  }),
+                ],
               ],
             ),
             const SizedBox(height: 16),

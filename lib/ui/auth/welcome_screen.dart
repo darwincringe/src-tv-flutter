@@ -2,12 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/theme.dart';
-import '../../data/auth/auth_service.dart';
 import 'auth_panel.dart';
 
 /// First-run gate: shown on a fresh install (no local data, not signed in) so
-/// the user can register/login or skip. Skipping keeps everything local. The
-/// router redirect (see router.dart) sends here only while the gate applies.
+/// the user can log in. The router redirect (see router.dart) sends here only
+/// while the gate applies.
 class WelcomeScreen extends StatelessWidget {
   const WelcomeScreen({super.key});
 
@@ -44,9 +43,8 @@ class WelcomeScreen extends StatelessWidget {
                         const Padding(
                           padding: EdgeInsets.symmetric(horizontal: 20),
                           child: Text(
-                            'Create an account to keep your watch history and '
-                            'library in sync across devices — or skip and just '
-                            'use it here.',
+                            'Sign in to keep your watch history and library '
+                            'in sync across devices.',
                             textAlign: TextAlign.center,
                             style: TextStyle(
                               color: AppColors.textSecondary,
@@ -56,12 +54,6 @@ class WelcomeScreen extends StatelessWidget {
                         ),
                         const SizedBox(height: 28),
                         AuthPanel(
-                          initialMode: AuthMode.register,
-                          showSkip: true,
-                          onSkip: () async {
-                            await AuthService.markOnboarded();
-                            if (context.mounted) context.go('/home');
-                          },
                           onAuthenticated: () {
                             if (context.mounted) context.go('/home');
                           },

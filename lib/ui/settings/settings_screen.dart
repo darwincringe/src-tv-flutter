@@ -70,7 +70,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Widget _signedOut() => const AuthPanel(initialMode: AuthMode.login);
+  Widget _signedOut() => const AuthPanel();
 
   Widget _signedIn() {
     return Column(

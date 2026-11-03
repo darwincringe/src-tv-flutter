@@ -17,7 +17,9 @@ import '../../data/models/details_dto.dart';
 import '../../data/repository/media_repository.dart';
 import '../../data/store/active_playback.dart';
 import '../../data/store/mirror_pref.dart';
+import '../../data/store/saved_subtitle.dart';
 import '../../data/store/subtitle_pref.dart';
+import '../../data/subtitle/subtitle_search.dart';
 import '../../data/store/watch_progress.dart';
 import '../../data/stream/extract_response.dart';
 import '../../data/stream/mirror_choice.dart';
@@ -30,6 +32,7 @@ import 'sound_boost.dart';
 import 'sound_pref.dart';
 import 'subtitle_config.dart';
 import 'subtitle_parser.dart';
+import 'subtitle_search_dialog.dart';
 
 class _EpisodeRef {
   final int season;
@@ -94,6 +97,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   // Streaming state
   final List<SubtitleOption> _uploadedSubs = [];
+  final Map<String, String> _localSubText = {};
   List<SubtitleOption> _subOptions = []; // all current subtitle options
   // We fetch + parse subtitles ourselves (see subtitle_parser.dart) and render
   // them in our own overlay, so better_player never parses them.
@@ -536,9 +540,26 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   // ---- Subtitles ---------------------------------------------------------
 
   void _setupSubtitles(List<String> apiUrls) {
+    final saved = SavedSubtitleStore.get(
+      _type,
+      _tmdbId,
+      _type == 'tv' ? _season : null,
+      _type == 'tv' ? _episode : null,
+    );
+    final savedOptions = <SubtitleOption>[];
+    if (saved != null) {
+      final uri = 'saved:${saved.fileId}';
+      _localSubText[uri] = saved.body;
+      savedOptions.add(SubtitleOption(
+        uri: uri,
+        label: saved.label,
+        language: saved.language,
+      ));
+    }
     _subOptions = [
       ...apiSubtitleOptions(apiUrls),
       ..._uploadedSubs,
+      ...savedOptions,
     ];
     _selectSubtitle(_defaultSubtitleIndex(_subOptions), remember: false);
   }
@@ -580,6 +601,18 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           offsetMs: prev?.offsetMs ?? 0,
         ),
       );
+    }
+    final local = _localSubText[opt.uri];
+    if (local != null) {
+      final cues = parseSubtitles(local);
+      if (!mounted || token != _subLoadToken) return;
+      setState(() => _cues = cues);
+      if (cues.isEmpty && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not load that subtitle')),
+        );
+      }
+      return;
     }
     // The subtitle host (OpenSubtitles) intermittently rate-limits back-to-back
     // requests — especially right after auto-advancing an episode — so a single
@@ -639,13 +672,62 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }
   }
 
-  void _showSubtitleDialog() {
-    if (_subOptions.isEmpty) {
+  Future<void> _searchSubtitle() async {
+    final chosen = await showSubtitleSearchDialog(
+      context,
+      initialQuery: defaultSubtitleSearchText(
+        _mediaTitle ?? '',
+        season: _type == 'tv' ? _season : null,
+        episode: _type == 'tv' ? _episode : null,
+      ),
+      title: _mediaTitle ?? '',
+      tmdbId: _tmdbId,
+      type: _type,
+      season: _type == 'tv' ? _season : null,
+      episode: _type == 'tv' ? _episode : null,
+    );
+    if (chosen == null || !mounted) return;
+    final cues = parseSubtitles(chosen.body);
+    if (cues.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No subtitles available')),
+        const SnackBar(content: Text('Couldn’t read any lines from that subtitle')),
       );
       return;
     }
+    await SavedSubtitleStore.save(
+      _type,
+      _tmdbId,
+      _type == 'tv' ? _season : null,
+      _type == 'tv' ? _episode : null,
+      SavedSubtitle(
+        fileId: chosen.fileId,
+        label: chosen.label,
+        language: chosen.language,
+        body: chosen.body,
+      ),
+    );
+    final uri = 'saved:${chosen.fileId}';
+    _localSubText[uri] = chosen.body;
+    final opt = SubtitleOption(
+      uri: uri,
+      label: chosen.label,
+      language: chosen.language,
+    );
+    setState(() {
+      _subOptions = [
+        ..._subOptions.where((s) => !s.uri.startsWith('saved:')),
+        opt,
+      ];
+    });
+    await _selectSubtitle(_subOptions.length - 1);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Subtitle saved for this title')),
+      );
+    }
+  }
+
+  void _showSubtitleDialog() {
     showDialog<void>(
       context: context,
       builder: (ctx) => SimpleDialog(
@@ -658,6 +740,22 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           for (var i = 0; i < _subOptions.length; i++)
             _dialogOption(ctx, _subOptions[i].label, i == _activeSubIndex,
                 () => _selectSubtitle(i)),
+          _DialogOption(
+            label: 'Upload SRT',
+            selected: false,
+            onTap: () {
+              Navigator.pop(ctx);
+              _uploadSubtitle();
+            },
+          ),
+          _DialogOption(
+            label: 'Search SRT',
+            selected: false,
+            onTap: () {
+              Navigator.pop(ctx);
+              _searchSubtitle();
+            },
+          ),
         ],
       ),
     );
@@ -1778,11 +1876,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                     ),
                     const SizedBox(width: 6),
                     _FocusIconButton(
-                      icon: Icons.upload_file,
-                      onTap: _uploadSubtitle,
-                    ),
-                    const SizedBox(width: 6),
-                    _FocusIconButton(
                       icon: Icons.settings,
                       onTap: _showQualityDialog,
                     ),
@@ -2199,24 +2292,33 @@ class _DialogOptionState extends State<_DialogOption> {
                 size: 18,
               ),
               const SizedBox(width: 12),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(widget.label, style: TextStyle(color: fg)),
-                  if (widget.detail != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 2),
-                      child: Text(
-                        widget.detail!,
-                        style: TextStyle(
-                          color: _focused
-                              ? Colors.black87
-                              : AppColors.textSecondary,
-                          fontSize: 12,
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      widget.label,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: fg),
+                    ),
+                    if (widget.detail != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          widget.detail!,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: _focused
+                                ? Colors.black87
+                                : AppColors.textSecondary,
+                            fontSize: 12,
+                          ),
                         ),
                       ),
-                    ),
-                ],
+                  ],
+                ),
               ),
             ],
           ),

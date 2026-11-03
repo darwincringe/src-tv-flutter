@@ -8,6 +8,16 @@ class StreamClient {
   /// HTTPS endpoint (behind nginx + Let's Encrypt on the droplet).
   static const String baseUrl = 'https://api.srctv.space/';
 
+  /// Set at startup so extract and the other locked routes can send
+  /// `Authorization` without this file importing the auth service.
+  static String? Function() bearerToken = () => null;
+
+  static Map<String, String> authHeaders() {
+    final token = bearerToken();
+    if (token == null || token.isEmpty) return const {};
+    return {'Authorization': 'Bearer $token'};
+  }
+
   StreamClient([Dio? dio])
       : _dio = dio ??
             Dio(
@@ -68,7 +78,11 @@ class StreamClient {
     if (season != null) params['season'] = season;
     if (episode != null) params['episode'] = episode;
     if (source != null && source.isNotEmpty) params['source'] = source;
-    final resp = await _dio.get('extract', queryParameters: params);
+    final resp = await _dio.get(
+      'extract',
+      queryParameters: params,
+      options: Options(headers: authHeaders()),
+    );
     final data = resp.data;
     if (data is! Map) {
       return const ExtractResponse(success: false, error: 'Bad response');

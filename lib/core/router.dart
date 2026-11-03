@@ -10,7 +10,7 @@ import '../ui/home/home_screen.dart';
 import '../ui/library/library_screen.dart';
 import '../ui/movies/movies_screen.dart';
 import '../ui/player/player_args.dart';
-import '../ui/player/player_view.dart';
+import '../ui/player/watch_gate.dart';
 import '../ui/player/youtube_trailer_screen.dart';
 import '../ui/helper/helper_screen.dart';
 import '../ui/search/search_screen.dart';
@@ -27,8 +27,8 @@ final GoRouter appRouter = GoRouter(
   navigatorKey: rootNavigatorKey,
   initialLocation: '/home',
   // First-run gate: on a fresh install (not signed in, never onboarded, and no
-  // local data yet) send the user to /welcome to register/login or skip. Once
-  // they sign in, skip, or have any local data, the gate no longer applies.
+  // local data yet) send the user to /welcome to log in. Once they sign in
+  // or have any local data, the gate no longer applies.
   redirect: (context, state) {
     final gate = !AuthService.isSignedIn &&
         !AuthService.onboardingDone &&
@@ -109,7 +109,7 @@ final GoRouter appRouter = GoRouter(
         final id = int.parse(s.pathParameters['id']!);
         final q = s.uri.queryParameters;
         final extra = s.extra;
-        return PlayerScreen(
+        return WatchGate(
           args: PlayerArgs.stream(
             tmdbId: id,
             type: type,
