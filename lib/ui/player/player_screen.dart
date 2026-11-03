@@ -18,6 +18,7 @@ import '../../data/repository/media_repository.dart';
 import '../../data/store/active_playback.dart';
 import '../../data/store/mirror_pref.dart';
 import '../../data/store/saved_subtitle.dart';
+import '../../data/store/subtitle_offset.dart';
 import '../../data/store/subtitle_pref.dart';
 import '../../data/subtitle/subtitle_search.dart';
 import '../../data/store/watch_progress.dart';
@@ -33,6 +34,7 @@ import 'sound_pref.dart';
 import 'subtitle_config.dart';
 import 'subtitle_parser.dart';
 import 'subtitle_search_dialog.dart';
+import 'subtitle_timing.dart';
 
 class _EpisodeRef {
   final int season;
@@ -98,6 +100,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   // Streaming state
   final List<SubtitleOption> _uploadedSubs = [];
   final Map<String, String> _localSubText = {};
+  int _offsetMs = 0;
   List<SubtitleOption> _subOptions = []; // all current subtitle options
   // We fetch + parse subtitles ourselves (see subtitle_parser.dart) and render
   // them in our own overlay, so better_player never parses them.
@@ -356,6 +359,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   Future<void> _resolveStream() async {
     if (_disposed) return;
+    _loadOffset();
     final token = ++_sourceToken;
     try {
       final repo = ref.read(mediaRepositoryProvider);
@@ -582,7 +586,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
             off: true,
             name: prev?.name,
             language: prev?.language,
-            offsetMs: prev?.offsetMs ?? 0,
+            autoSync: false,
+            offsetMs: 0,
           ),
         );
       }
@@ -598,7 +603,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         SubtitlePref(
           name: opt.label,
           language: subtitlePrefLanguage(opt),
-          offsetMs: prev?.offsetMs ?? 0,
+          autoSync: false,
+          offsetMs: 0,
         ),
       );
     }
@@ -727,6 +733,27 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }
   }
 
+  void _loadOffset() {
+    _offsetMs = SubtitleOffsetStore.get(
+      _type,
+      _tmdbId,
+      _type == 'tv' ? _season : null,
+      _type == 'tv' ? _episode : null,
+    );
+  }
+
+  Future<void> _applyOffset(int offsetMs) async {
+    _offsetMs = offsetMs;
+    await SubtitleOffsetStore.save(
+      _type,
+      _tmdbId,
+      _type == 'tv' ? _season : null,
+      _type == 'tv' ? _episode : null,
+      offsetMs,
+    );
+    if (mounted) setState(() {});
+  }
+
   void _showSubtitleDialog() {
     showDialog<void>(
       context: context,
@@ -755,6 +782,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
               Navigator.pop(ctx);
               _searchSubtitle();
             },
+          ),
+          SubtitleTimingControls(
+            offsetMs: _offsetMs,
+            onChanged: _applyOffset,
           ),
         ],
       ),
@@ -1048,13 +1079,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   /// Current subtitle text for the active track, from our own parsed cues at
   /// the current position (rendered by us for a bold/shadow Netflix look).
-  /// The stored shift for this title — including one measured on the website —
-  /// is applied so the phone shows the same timing.
+  /// A positive offset delays the captions.
   String? _currentSubtitleText() {
     if (_cues.isEmpty) return null;
-    final offset =
-        SubtitlePrefStore.get(_type, _tmdbId, _season)?.offsetMs ?? 0;
-    final pos = _position + Duration(milliseconds: offset);
+    final pos = _position - Duration(milliseconds: _offsetMs);
     for (final c in _cues) {
       if (pos >= c.start && pos <= c.end) {
         final t = c.text.trim();

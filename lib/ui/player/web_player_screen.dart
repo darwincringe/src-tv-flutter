@@ -1,8 +1,6 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:js_interop';
 import 'dart:js_interop_unsafe';
-import 'dart:typed_data';
 import 'dart:ui_web' as ui_web;
 
 import 'package:file_selector/file_selector.dart';
@@ -20,6 +18,7 @@ import '../../data/models/details_dto.dart';
 import '../../data/repository/media_repository.dart';
 import '../../data/store/mirror_pref.dart';
 import '../../data/store/saved_subtitle.dart';
+import '../../data/store/subtitle_offset.dart';
 import '../../data/store/subtitle_pref.dart';
 import '../../data/subtitle/subtitle_search.dart';
 import '../../data/store/watch_progress.dart';
@@ -33,7 +32,7 @@ import 'sound_pref.dart';
 import 'subtitle_config.dart';
 import 'subtitle_parser.dart';
 import 'subtitle_search_dialog.dart';
-import 'subtitle_sync.dart';
+import 'subtitle_timing.dart';
 
 // ---- hls.js interop (bundled in web/hls.min.js, loaded from index.html) -----
 @JS('Hls')
@@ -65,10 +64,7 @@ extension type _AudioCtx._(JSObject _) implements JSObject {
   external _BiquadFilter createBiquadFilter();
   external _DynamicsCompressor createDynamicsCompressor();
   external _GainNode createGain();
-  external _ScriptProcessor createScriptProcessor(
-      int bufferSize, int inputs, int outputs);
   external JSObject get destination;
-  external double get sampleRate;
   external JSPromise resume();
   external JSPromise close();
 }
@@ -81,15 +77,6 @@ extension type _GainNode._(JSObject _) implements JSObject {
 extension type _AudioParam._(JSObject _) implements JSObject {
   external set value(double v);
 }
-
-extension type _ScriptProcessor._(JSObject _) implements JSObject {
-  external void connect(JSObject destination);
-  external set onaudioprocess(JSFunction fn);
-}
-
-@JS('srctvTranscribe')
-external JSPromise<JSString> _srctvTranscribe(
-    JSFloat32Array samples, double sampleRate);
 
 extension type _AudioNode._(JSObject _) implements JSObject {
   external void connect(JSObject destination);
@@ -188,16 +175,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   List<SubtitleCue> _cues = const [];
   int _subToken = 0;
   String? _cueText;
-  bool _autoSync = false;
   int _syncOffsetMs = 0;
-  int _syncToken = 0;
-  int _syncAttempts = 0;
-  final ValueNotifier<String> _syncNote = ValueNotifier('');
-  bool _armCapture = false;
-  final List<Float32List> _pcmChunks = [];
-  int _pcmSamples = 0;
-  int? _lineVideoMs;
-  Completer<void>? _captureDone;
   _AudioCtx? _audioCtx;
   _BiquadFilter? _lowCut;
   _BiquadFilter? _lowShelf;
@@ -275,6 +253,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
       });
       return;
     }
+    _loadOffset();
     try {
       final repo = ref.read(mediaRepositoryProvider);
       final playback = await resolvePlayback(
@@ -558,7 +537,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
       if (_cueText != null && mounted) setState(() => _cueText = null);
       return;
     }
-    final pos = Duration(milliseconds: _positionMs + _syncOffsetMs);
+    final pos = Duration(milliseconds: _positionMs - _syncOffsetMs);
     String? text;
     for (final c in _cues) {
       if (pos >= c.start && pos <= c.end) {
@@ -758,17 +737,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   Future<void> _selectSubtitle(int index, {bool save = true}) async {
-    // Re-tapping the current track (or closing the menu onto it) must not
-    // cancel a listen that is already running.
-    if (index == _subIndex && _autoSync && _cues.isNotEmpty) return;
-    _syncToken++;
-    _syncAttempts = 0;
-    // Opt-in. Don't check the box from a previous visit, and don't keep a
-    // shift from a bad earlier guess. Timing stays on the file's own clock
-    // until the viewer turns auto-sync on.
-    _autoSync = false;
-    _syncOffsetMs = 0;
-    _syncNote.value = '';
+    _subToken++;
     setState(() {
       _subIndex = index;
       _cues = const [];
@@ -796,16 +765,9 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
     final idx = rememberedSubtitleIndex(_subs, pref);
     if (idx == null) return;
     if (idx != _subIndex) {
-      if (_autoSync) return;
       _selectSubtitle(idx, save: false);
       return;
     }
-    if (!_autoSync || pref.offsetMs == _syncOffsetMs) return;
-    _syncOffsetMs = pref.offsetMs;
-    if (_iosNative && _subIndex >= 0 && _cues.isNotEmpty) {
-      _applyIosTextTrack(_cues, _subIndex);
-    }
-    if (mounted) setState(() {});
   }
 
   Future<void> _persistSubPref(int index) {
@@ -815,40 +777,44 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
             off: true,
             name: prev?.name,
             language: prev?.language,
-            offsetMs: prev?.offsetMs ?? _syncOffsetMs,
+            offsetMs: 0,
           )
         : SubtitlePref(
             name: _subs[index].label,
             language: subtitlePrefLanguage(_subs[index]),
-            autoSync: _autoSync,
-            offsetMs: _syncOffsetMs,
+            autoSync: false,
+            offsetMs: 0,
           );
     return SubtitlePrefStore.save(_a.type!, _a.tmdbId!, _season, pref);
   }
 
-  Future<void> _setAutoSync(bool on) async {
-    if (on) {
-      // Same audio graph as the sound booster. Start it in this tap, before
-      // any await, so the browser allows it.
-      _ensureAudio();
-      _audioCtx?.resume();
-    }
-    _autoSync = on;
-    if (!on) {
-      _syncToken++;
-      _syncAttempts = 0;
-      _syncOffsetMs = 0;
-      _syncNote.value = '';
-    } else {
-      _syncAttempts = 0;
-      _syncNote.value = 'Listening to the audio…';
-    }
-    if (mounted) setState(() {});
-    await _persistSubPref(_subIndex);
-    if (on && _subIndex >= 0 && _cues.isNotEmpty) _beginAutoSync();
+  void _loadOffset() {
+    if (_a.type == null || _a.tmdbId == null) return;
+    _syncOffsetMs = SubtitleOffsetStore.get(
+      _a.type!,
+      _a.tmdbId!,
+      _isTv ? _season : null,
+      _isTv ? _episode : null,
+    );
   }
 
-  bool _tapAudio() => _ensureAudio();
+  Future<void> _applyOffset(int offsetMs) async {
+    _syncOffsetMs = offsetMs;
+    if (_a.type != null && _a.tmdbId != null) {
+      await SubtitleOffsetStore.save(
+        _a.type!,
+        _a.tmdbId!,
+        _isTv ? _season : null,
+        _isTv ? _episode : null,
+        offsetMs,
+      );
+    }
+    if (_iosNative && _subIndex >= 0 && _cues.isNotEmpty) {
+      _applyIosTextTrack(_cues, _subIndex);
+    }
+    _updateCue();
+    if (mounted) setState(() {});
+  }
 
   /// Route the video through an equalizer. Once this runs, the <video>
   /// element no longer plays audio on its own, so it must only happen from
@@ -872,15 +838,6 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
       highShelf.connect(compressor);
       compressor.connect(makeup);
       makeup.connect(ctx.destination);
-      // Subtitle auto-sync listens to the original mix, not the boosted one,
-      // and this branch is muted so it doesn't play twice.
-      final processor = ctx.createScriptProcessor(4096, 1, 1);
-      final mute = ctx.createGain();
-      mute.gain.value = 0;
-      processor.onaudioprocess = _onPcm.toJS;
-      source.connect(processor);
-      processor.connect(mute);
-      mute.connect(ctx.destination);
       _audioCtx = ctx;
       _lowCut = lowCut;
       _lowShelf = lowShelf;
@@ -977,170 +934,12 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
     if (wasPlaying) _restartHideTimer();
   }
 
-  void _onPcm(JSObject event) {
-    if (!_armCapture || !_autoSync || _video.paused) return;
-    final input = event['inputBuffer'] as JSObject?;
-    if (input == null) return;
-    final data = input.callMethod<JSFloat32Array>('getChannelData'.toJS, 0.toJS);
-    final view = data.toDart;
-    var energy = 0.0;
-    var counted = 0;
-    for (var i = 0; i < view.length; i += 8) {
-      final v = view[i];
-      energy += v * v;
-      counted++;
-    }
-    final loud = counted > 0 && energy / counted > 0.0004;
-    if (_lineVideoMs == null) {
-      if (!loud) return;
-      final t = _video.currentTime;
-      if (!t.isFinite || t < 0) return;
-      // This buffer already played, so the sentence started one buffer ago.
-      final bufferSec = view.length / (_audioCtx?.sampleRate ?? 48000);
-      final start = t - bufferSec;
-      _lineVideoMs = ((start < 0 ? 0 : start) * 1000).round();
-    }
-    _pcmChunks.add(Float32List.fromList(view));
-    _pcmSamples += view.length;
-    final rate = _audioCtx?.sampleRate ?? 48000;
-    if (_pcmSamples / rate >= 6) {
-      _armCapture = false;
-      final done = _captureDone;
-      if (done != null && !done.isCompleted) done.complete();
-    }
-  }
-
-  Future<({Float32List samples, double rate, int videoMs})?> _captureLine(
-    int token,
-  ) async {
-    _pcmChunks.clear();
-    _pcmSamples = 0;
-    _lineVideoMs = null;
-    final done = Completer<void>();
-    _captureDone = done;
-    _armCapture = true;
-    final started = DateTime.now();
-    while (!done.isCompleted &&
-        DateTime.now().difference(started) < const Duration(seconds: 22)) {
-      if (!mounted || token != _syncToken || !_autoSync) {
-        _armCapture = false;
-        return null;
-      }
-      await Future.delayed(const Duration(milliseconds: 200));
-    }
-    _armCapture = false;
-    final rate = _audioCtx?.sampleRate ?? 0;
-    final startMs = _lineVideoMs;
-    if (startMs == null || rate <= 0 || _pcmSamples < rate * 2) return null;
-    final merged = Float32List(_pcmSamples);
-    var offset = 0;
-    for (final chunk in _pcmChunks) {
-      merged.setRange(offset, offset + chunk.length, chunk);
-      offset += chunk.length;
-    }
-    _pcmChunks.clear();
-    _pcmSamples = 0;
-    return (samples: merged, rate: rate, videoMs: startMs);
-  }
-
-  /// Text of one spoken sentence, and how far into the recording it began.
-  Future<({String text, int startMs})?> _readLine(
-    Float32List samples,
-    double rate,
-  ) async {
-    try {
-      final raw =
-          (await _srctvTranscribe(samples.toJS, rate).toDart).toDart;
-      final decoded = jsonDecode(raw);
-      if (decoded is Map) {
-        final start = (decoded['start'] as num?)?.toDouble() ?? 0;
-        return (
-          text: (decoded['text'] ?? '').toString(),
-          startMs: start > 0 ? (start * 1000).round() : 0,
-        );
-      }
-      return (text: raw, startMs: 0);
-    } catch (_) {
-      return null;
-    }
-  }
-
-  /// Hears one spoken line, finds that line in the subtitle file, and shifts
-  /// the captions so the file's timestamp matches the video.
-  Future<void> _beginAutoSync() async {
-    final token = ++_syncToken;
-    if (_subIndex < 0 || _cues.isEmpty || !_autoSync) {
-      if (_subIndex < 0) _syncNote.value = 'Choose a subtitle first';
-      return;
-    }
-    if (!_tapAudio()) {
-      _finishSyncNote(
-          'This stream doesn’t share its audio, so auto-sync can’t run');
-      return;
-    }
-    try {
-      await _audioCtx!.resume().toDart;
-    } catch (_) {}
-    _syncNote.value = 'Listening for a line of dialogue…';
-    final clip = await _captureLine(token);
-    if (!mounted || token != _syncToken || !_autoSync) return;
-    if (clip == null) {
-      if (_syncAttempts >= 2) {
-        _finishSyncNote('Couldn’t hear a clear line of dialogue');
-        return;
-      }
-      _syncAttempts++;
-      _syncNote.value = 'Not enough dialogue yet — still listening';
-      await Future.delayed(const Duration(seconds: 2));
-      if (!mounted || token != _syncToken || !_autoSync) return;
-      return _beginAutoSync();
-    }
-    _syncNote.value =
-        'Reading that line… the first time also downloads a speech model';
-    final heard = await _readLine(clip.samples, clip.rate);
-    if (!mounted || token != _syncToken || !_autoSync) return;
-    if (heard == null) {
-      _finishSyncNote('Couldn’t read the dialogue from this stream');
-      return;
-    }
-    final quote = heard.text.replaceAll(RegExp(r'\s+'), ' ').trim();
-    final offset = subtitleLineOffsetMs(
-      transcript: quote,
-      videoMs: clip.videoMs + heard.startMs,
-      cues: _cues,
-    );
-    if (offset == null) {
-      if (_syncAttempts >= 2) {
-        final shown = quote.length > 80 ? '${quote.substring(0, 77)}…' : quote;
-        _finishSyncNote(shown.isEmpty
-            ? 'Couldn’t hear a clear line of dialogue'
-            : 'Heard “$shown” but couldn’t find that line in the subtitles');
-        return;
-      }
-      _syncAttempts++;
-      _syncNote.value = 'That line wasn’t in the subtitles — listening again';
-      await Future.delayed(const Duration(seconds: 1));
-      if (!mounted || token != _syncToken || !_autoSync) return;
-      return _beginAutoSync();
-    }
-    _syncAttempts = 0;
-    _syncOffsetMs = offset;
-    final secs = (offset.abs() / 1000).toStringAsFixed(1);
-    _finishSyncNote(offset == 0
-        ? 'Already lined up'
-        : offset > 0
-            ? 'Shifted ${secs}s earlier'
-            : 'Shifted ${secs}s later');
-    if (_iosNative && _subIndex >= 0) _applyIosTextTrack(_cues, _subIndex);
-    await _persistSubPref(_subIndex);
-    if (mounted) setState(() {});
-  }
 
   // ---- iOS native subtitle track (WebVTT) --------------------------------
   void _applyIosTextTrack(List<SubtitleCue> cues, int index) {
     try {
       _clearIosTextTrack();
-      final shift = Duration(milliseconds: _syncOffsetMs);
+      final shift = Duration(milliseconds: -_syncOffsetMs);
       final shifted = shift == Duration.zero
           ? cues
           : [
@@ -1269,9 +1068,8 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
       builder: (_) => _SubtitleMenu(
         labels: labels,
         current: _subIndex + 1, // row 0 = Off
-        autoSync: _autoSync,
-        note: _syncNote,
-        onAutoSync: _setAutoSync,
+        offsetMs: _syncOffsetMs,
+        onOffset: _applyOffset,
         onUpload: _uploadSubtitle,
         onSearch: _searchSubtitle,
       ),
@@ -1442,8 +1240,6 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
 
   @override
   void dispose() {
-    _syncToken++;
-    _syncNote.dispose();
     final kick = _gestureKick;
     if (kick != null) {
       web.document.removeEventListener('pointerdown', kick);
@@ -1511,7 +1307,6 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
               ),
             ),
             if (!_iosNative && _cueText != null) _subtitleOverlay(),
-            if (_autoSync) _syncStatus(),
             if (_loading) _loaderOverlay(),
             if (_errorMsg != null) PointerInterceptor(child: _errorOverlay()),
             if (_errorMsg == null && !_loading && _showControls)
@@ -1617,51 +1412,6 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
           ],
         ),
       );
-
-  /// Small status while captions are being lined up. It does not block the
-  /// movie, and it goes away a few seconds after a result.
-  Widget _syncStatus() {
-    return Positioned(
-      top: 28,
-      left: 24,
-      right: 24,
-      child: IgnorePointer(
-        child: ValueListenableBuilder<String>(
-          valueListenable: _syncNote,
-          builder: (_, text, _) {
-            if (text.isEmpty) return const SizedBox.shrink();
-            return Align(
-              alignment: Alignment.topCenter,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: Colors.black87,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                  child: Text(
-                    text,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(color: Colors.white, fontSize: 13),
-                  ),
-                ),
-              ),
-            );
-          },
-        ),
-      ),
-    );
-  }
-
-  void _finishSyncNote(String text) {
-    _syncNote.value = text;
-    final token = _syncToken;
-    Future.delayed(const Duration(seconds: 4), () {
-      if (!mounted || token != _syncToken) return;
-      if (_syncNote.value == text) _syncNote.value = '';
-    });
-  }
 
   Widget _subtitleOverlay() {
     // Same sizing as the Android player: a fraction of screen width, so a
@@ -2082,22 +1832,20 @@ class _SkipButtonState extends State<_SkipButton> {
   }
 }
 
-/// Subtitle list plus auto-sync. Pops the chosen row.
+/// Subtitle list, upload, search, and manual timing. Pops the chosen row.
 class _SubtitleMenu extends StatefulWidget {
   const _SubtitleMenu({
     required this.labels,
     required this.current,
-    required this.autoSync,
-    required this.note,
-    required this.onAutoSync,
+    required this.offsetMs,
+    required this.onOffset,
     required this.onUpload,
     required this.onSearch,
   });
   final List<String> labels;
   final int current;
-  final bool autoSync;
-  final ValueNotifier<String> note;
-  final ValueChanged<bool> onAutoSync;
+  final int offsetMs;
+  final ValueChanged<int> onOffset;
   final Future<bool> Function() onUpload;
   final Future<bool> Function() onSearch;
 
@@ -2106,8 +1854,6 @@ class _SubtitleMenu extends StatefulWidget {
 }
 
 class _SubtitleMenuState extends State<_SubtitleMenu> {
-  late bool _autoSync = widget.autoSync;
-
   @override
   Widget build(BuildContext context) {
     return PointerInterceptor(
@@ -2170,32 +1916,9 @@ class _SubtitleMenuState extends State<_SubtitleMenu> {
                   },
                 ),
                 const Divider(height: 1, color: Colors.white24),
-                CheckboxListTile(
-                  value: _autoSync,
-                  onChanged: (v) {
-                    final on = v ?? false;
-                    setState(() => _autoSync = on);
-                    widget.onAutoSync(on);
-                    // Leave the menu so the movie stays visible while it listens.
-                    if (on && widget.current > 0) Navigator.pop(context);
-                  },
-                  activeColor: Colors.white,
-                  checkColor: Colors.black,
-                  dense: true,
-                  title: const Text(
-                    'Auto-sync timing (Beta)',
-                    style: TextStyle(color: AppColors.textPrimary, fontSize: 15),
-                  ),
-                  subtitle: ValueListenableBuilder<String>(
-                    valueListenable: widget.note,
-                    builder: (_, text, _) => Text(
-                      text.isEmpty
-                          ? 'Hears one line, finds it in the subtitles, and shifts the timing. You can keep watching.'
-                          : text,
-                      style: const TextStyle(
-                          color: AppColors.textSecondary, fontSize: 12),
-                    ),
-                  ),
+                SubtitleTimingControls(
+                  offsetMs: widget.offsetMs,
+                  onChanged: widget.onOffset,
                 ),
               ],
             ),
