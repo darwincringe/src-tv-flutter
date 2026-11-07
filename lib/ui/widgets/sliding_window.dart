@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../../core/focus.dart';
 import 'continue_watching_row.dart';
 import 'edge_fade.dart';
 
@@ -304,7 +305,9 @@ class _SlidingWindowState extends State<SlidingWindow> {
     return SizedBox(
       width: width,
       height: height,
-      child: EdgeFade(
+      child: FocusTraversalGroup(
+        policy: posterRowTraversal,
+        child: EdgeFade(
         controller: _scroller,
         child: SingleChildScrollView(
         controller: _scroller,
@@ -326,6 +329,7 @@ class _SlidingWindowState extends State<SlidingWindow> {
           ),
         ),
         ),
+      ),
       ),
     );
   }

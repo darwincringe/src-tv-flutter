@@ -295,7 +295,9 @@ class _PagedPosterGridState extends State<PagedPosterGrid> {
     return SizedBox(
       width: width,
       height: height,
-      child: EdgeFade(
+      child: FocusTraversalGroup(
+        policy: posterRowTraversal,
+        child: EdgeFade(
         controller: _scroller,
         child: SingleChildScrollView(
         controller: _scroller,
@@ -317,6 +319,7 @@ class _PagedPosterGridState extends State<PagedPosterGrid> {
           ),
         ),
         ),
+      ),
       ),
     );
   }

@@ -29,6 +29,9 @@ class CategoryRowSection extends StatefulWidget {
 }
 
 class _CategoryRowSectionState extends State<CategoryRowSection> {
+  int? _focusedIndex;
+  int _focusGen = 0;
+
   @override
   void didUpdateWidget(CategoryRowSection oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -94,11 +97,22 @@ class _CategoryRowSectionState extends State<CategoryRowSection> {
                   watchedType: widget.row.fallbackType,
                   autofocus: lead && widget.autofocusFirst,
                   focusNode: focusNode,
-                  ensureVisibleOnFocus: true,
-                  onFocusChange: (f) {
-                    if (f) {
+                  onFocusChange: (focused) {
+                    if (focused) {
+                      _focusGen++;
+                      final entered = _focusedIndex == null;
+                      _focusedIndex = index;
                       widget.onItemFocus?.call(item);
-                      _ensureSectionVisible();
+                      // Left/right stays in this row. Scrolling the section
+                      // again is what nudges the page up and down.
+                      if (entered) _ensureSectionVisible();
+                    } else {
+                      final token = ++_focusGen;
+                      final leaving = index;
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (!mounted || token != _focusGen) return;
+                        if (_focusedIndex == leaving) _focusedIndex = null;
+                      });
                     }
                   },
                   onTap: () => widget.onItemTap(item),
