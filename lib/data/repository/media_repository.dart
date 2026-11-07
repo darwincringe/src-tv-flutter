@@ -425,6 +425,20 @@ class MediaRepository {
         source: source,
       );
 
+  /// English Wyzie subtitles for this title. Empty when none are listed.
+  Future<List<String>> englishSubtitles(
+    String type,
+    int tmdbId, {
+    int? season,
+    int? episode,
+  }) =>
+      _stream.wyzie(
+        tmdbId,
+        type,
+        season: season,
+        episode: episode,
+      );
+
   // ---- Personalization ---------------------------------------------------
 
   /// Recommendations from watch history + search seeds. [scope] is 'home',

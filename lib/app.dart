@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'core/history_policy.dart';
 import 'core/navigation.dart';
@@ -26,6 +27,25 @@ class _AppScrollBehavior extends MaterialScrollBehavior {
         PointerDeviceKind.stylus,
       };
 }
+
+/// The packaged TV build is still a web app, and Flutter's web defaults turn
+/// arrow keys into page scrolling. A remote has no mouse, so those keys have
+/// to move the focus ring instead, the same way they do on Android TV.
+const _tizenWeb = bool.fromEnvironment('TIZEN_WEB');
+
+final Map<ShortcutActivator, Intent>? _tizenShortcuts = _tizenWeb
+    ? <ShortcutActivator, Intent>{
+        ...WidgetsApp.defaultShortcuts,
+        const SingleActivator(LogicalKeyboardKey.arrowUp):
+            DirectionalFocusIntent(TraversalDirection.up),
+        const SingleActivator(LogicalKeyboardKey.arrowDown):
+            DirectionalFocusIntent(TraversalDirection.down),
+        const SingleActivator(LogicalKeyboardKey.arrowLeft):
+            DirectionalFocusIntent(TraversalDirection.left),
+        const SingleActivator(LogicalKeyboardKey.arrowRight):
+            DirectionalFocusIntent(TraversalDirection.right),
+      }
+    : null;
 
 class SrcTvApp extends StatefulWidget {
   const SrcTvApp({super.key});
@@ -112,6 +132,7 @@ class _SrcTvAppState extends State<SrcTvApp> with WidgetsBindingObserver {
       // Continue Watching, incl. its lazy-load-on-scroll) can't be dragged in a
       // browser. Harmless on Android (touch already works).
       scrollBehavior: const _AppScrollBehavior(),
+      shortcuts: _tizenShortcuts,
       routerConfig: appRouter,
     );
   }

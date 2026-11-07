@@ -15,6 +15,7 @@ import '../ui/player/youtube_trailer_screen.dart';
 import '../ui/helper/helper_screen.dart';
 import '../ui/search/search_screen.dart';
 import '../ui/series/series_screen.dart';
+import '../ui/privacy/privacy_screen.dart';
 import '../ui/settings/settings_screen.dart';
 import '../ui/shell/app_shell.dart';
 
@@ -39,7 +40,8 @@ final GoRouter appRouter = GoRouter(
     // Let a shared deep link (a specific title or video) through the first-run
     // gate so the link actually opens what it points at.
     final isDeepLink = loc.startsWith('/watch') || loc.startsWith('/details');
-    if (gate && !atWelcome && !isDeepLink) return '/welcome';
+    final isPrivacy = loc == '/privacy' || loc.startsWith('/privacy/');
+    if (gate && !atWelcome && !isDeepLink && !isPrivacy) return '/welcome';
     if (!gate && atWelcome) return '/home';
     return null;
   },
@@ -124,6 +126,16 @@ final GoRouter appRouter = GoRouter(
       path: '/trailer/:key',
       parentNavigatorKey: rootNavigatorKey,
       builder: (c, s) => YoutubeTrailerScreen(videoId: s.pathParameters['key']!),
+    ),
+    GoRoute(
+      path: '/privacy',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (c, s) => const PrivacyScreen(),
+    ),
+    GoRoute(
+      path: '/privacy/ko',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (c, s) => const PrivacyScreen(korean: true),
     ),
   ],
 );

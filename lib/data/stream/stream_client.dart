@@ -42,31 +42,59 @@ class StreamClient {
       : url;
 
   /// Subtitle URL adjusted for the current platform. On the WEB build, the
-  /// backend's direct `dl.opensubtitles.org/...` links are CORS-blocked by the
-  /// browser, so route them through our own `/wyzie-subtitle-srt` proxy (which
-  /// carries CORS headers). Subtitles already on our host, and all native
-  /// builds, pass through unchanged.
+  /// backend's direct links are CORS-blocked by the browser, so route them
+  /// through `/wyzie-subtitle-srt`. Subtitles already on our host, and all
+  /// native builds, pass through unchanged. A `release` label stays visible
+  /// to the player either as a real query param or as the source's `&release=`
+  /// suffix.
   String _subtitleUrl(String url) {
     final upgraded = _upgrade(url);
     if (!kIsWeb) return upgraded;
-    if (upgraded.startsWith('$_scheme://$_host')) return upgraded; // already ours
-    // Direct source links append "&release=..." as a NON-query suffix (see
-    // subtitle_config.dart). Split it off so only the real download URL is
-    // proxied; re-attach it as a query param after our proxy URL.
+    if (upgraded.startsWith('$_scheme://$_host')) return upgraded;
     var downloadUrl = upgraded;
     var releaseSuffix = '';
-    if (!upgraded.contains('?')) {
+    final parsed = Uri.tryParse(upgraded);
+    final queryRelease = parsed?.queryParameters['release']?.trim();
+    if (queryRelease != null && queryRelease.isNotEmpty) {
+      releaseSuffix = '&release=${Uri.encodeQueryComponent(queryRelease)}';
+    } else if (!upgraded.contains('?')) {
       final m =
           RegExp(r'&release=(.+)$', caseSensitive: false).firstMatch(upgraded);
       if (m != null) {
         downloadUrl = upgraded.substring(0, m.start);
-        releaseSuffix = upgraded.substring(m.start); // "&release=<encoded>"
+        releaseSuffix = upgraded.substring(m.start);
       }
     }
     return '${baseUrl}wyzie-subtitle-srt?url='
         '${Uri.encodeComponent(downloadUrl)}$releaseSuffix';
   }
 
+  /// English Wyzie tracks only. Empty when Wyzie has no English release.
+  Future<List<String>> wyzie(
+    int tmdbId,
+    String type, {
+    int? season,
+    int? episode,
+  }) async {
+    final params = <String, dynamic>{'tmdb_id': tmdbId, 'type': type};
+    if (season != null) params['season'] = season;
+    if (episode != null) params['episode'] = episode;
+    final resp = await _dio.get(
+      'wyzie',
+      queryParameters: params,
+      options: Options(headers: authHeaders()),
+    );
+    final data = resp.data;
+    if (data is! Map) return const [];
+    final raw = data['subtitles'];
+    if (raw is! List) return const [];
+    return [
+      for (final item in raw)
+        if (item is String && item.isNotEmpty) _subtitleUrl(item),
+    ];
+  }
+
+  /// One pinned provider from `GET /extract/vaplayer`.
   Future<ExtractResponse> extract(
     int tmdbId,
     String type, {
@@ -79,7 +107,7 @@ class StreamClient {
     if (episode != null) params['episode'] = episode;
     if (source != null && source.isNotEmpty) params['source'] = source;
     final resp = await _dio.get(
-      'extract',
+      'extract/vaplayer',
       queryParameters: params,
       options: Options(headers: authHeaders()),
     );
@@ -89,12 +117,15 @@ class StreamClient {
     }
     final json = Map<String, dynamic>.from(data);
     final r = ExtractResponse.fromJson(json);
-    // Upgrade our-host URLs to https (external subtitle URLs are left as-is).
+    final provider = json['source'];
+    final quality = json['quality'];
     return ExtractResponse(
       success: r.success,
       hlsUrl: r.hlsUrl == null ? null : _upgrade(r.hlsUrl!),
       subtitles: r.subtitles.map(_subtitleUrl).toList(),
       error: r.error,
+      source: provider is String ? provider : null,
+      quality: quality is String ? quality : null,
       mirrors: _parseMirrors(json['mirrors']),
     );
   }

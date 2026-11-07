@@ -111,6 +111,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   bool _resumeDone = true;
   bool _notedWatched = false;
   int _resumeSeekAtMs = 0; // when the resume seek was issued (reveal fallback)
+  // True from the moment Next/Previous is pressed until the new file's clock
+  // has replaced the previous episode's.
+  bool _awaitingFreshClock = false;
   int _retryCount = 0;
 
   // UI state
@@ -153,6 +156,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   List<StreamMirror> _mirrors = const [];
   int _mirrorIndex = -1;
   int _sourceToken = 0;
+  // Bumped when a different file is attached, so a mirror switch does not
+  // cancel the queue that is still fetching the other providers.
+  int _attachToken = 0;
+  bool _pickedSubtitle = false;
   bool _scrubbing = false; // seek-bar "scrub mode" active
   int _scrubPreviewMs = 0; // marker position while scrubbing (not yet applied)
   bool _wasPlayingBeforeScrub = false;
@@ -361,10 +368,28 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (_disposed) return;
     _loadOffset();
     final token = ++_sourceToken;
+    final attach = ++_attachToken;
+    _pickedSubtitle = false;
+    _applyMirrors(const [], -1);
     try {
       final repo = ref.read(mediaRepositoryProvider);
-      final playback = await resolvePlayback(
-        preferred: MirrorPrefStore.get(_type, _tmdbId),
+      final meta = _loadPlaybackMeta(repo, token);
+      List<String> wyzie = const [];
+      try {
+        wyzie = await repo.englishSubtitles(
+          _type,
+          _tmdbId,
+          season: _season,
+          episode: _episode,
+        );
+      } catch (_) {}
+      if (token != _sourceToken || _disposed) return;
+      _applySubtitleUrls(wyzie);
+
+      final season = _type == 'tv' ? _season : null;
+      var started = false;
+      await for (final slice in playbackSlices(
+        preferred: MirrorPrefStore.get(_type, _tmdbId, season),
         extract: (source) => repo.streamSource(
           _type,
           _tmdbId,
@@ -372,69 +397,94 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           episode: _episode,
           source: source,
         ),
-      );
-      if (token != _sourceToken || _disposed) return;
-      if (playback == null) {
-        _retryOrError('No playable source found');
-        return;
-      }
-      final res = playback.response;
-      _applyMirrors(res.mirrors, playback.index);
-
-      if (_mediaTitle == null) {
-        try {
-          final d = await repo.details(_type, _tmdbId, extras: false);
-          _mediaTitle = d.title;
-          _posterPath = d.posterPath;
-          _backdropPath = d.backdropPath;
-          _isTv = d.isTv;
-          _seasons = d.seasons;
-          if (mounted) setState(() {}); // show the backdrop on the loader
-        } catch (_) {}
-      }
-      if (token != _sourceToken || _disposed) return;
-      if (_type == 'tv' && _episode != null) {
-        try {
-          final eps = await repo.episodes(_tmdbId, _season ?? 1);
-          final match = eps.where((e) => e.episodeNumber == _episode);
-          _episodeName = match.isNotEmpty ? match.first.name : null;
-          // Prefer this episode's own still on the loading screen.
-          _episodeStillPath = match.isNotEmpty ? match.first.stillPath : null;
-          if (mounted) setState(() {}); // swap the loader to the episode banner
-        } catch (_) {
-          _episodeName = null;
+      )) {
+        if (token != _sourceToken || _disposed) return;
+        _applySubtitleUrls(mergeSubtitleUrls(wyzie, slice.subtitles));
+        if (!started && slice.playUrl != null) {
+          started = true;
+          _applyMirrors(slice.mirrors, slice.playIndex);
+          _resumeTargetMs = _savedResumePosition();
+          // Episode changes keep this false until the new file's clock is live.
+          // Opening a title can record progress as soon as playback is underway.
+          _resumeDone = _awaitingFreshClock ? false : _resumeTargetMs <= 0;
+          _controller ??= _buildController();
+          await _controller!.setupDataSource(_hlsSource(slice.playUrl!));
+          if (token != _sourceToken || _disposed) return;
+          if (attach != _attachToken) continue;
+          if (_awaitingFreshClock && _resumeTargetMs <= 0) {
+            await _controller?.seekTo(Duration.zero);
+            _position = Duration.zero;
+          }
+          if (token != _sourceToken || _disposed) return;
+          if (attach != _attachToken) continue;
+          if (_disposed) {
+            _controller?.pause();
+            _controller?.dispose(forceDispose: true);
+            return;
+          }
+          if (_resumeTargetMs > 0) {
+            await _controller?.setVolume(0);
+          }
+          if (mounted) setState(() {});
+        } else {
+          final playing = _urlAt(_mirrorIndex);
+          _applyMirrors(slice.mirrors, _indexOfUrl(slice.mirrors, playing));
+          if (mounted) setState(() {});
         }
       }
-      _computeEpisodeRefs();
-      if (_type == 'tv' && _season != null && _episode != null) {
-        _fetchSegments(_season!, _episode!);
-      }
-      _resumeTargetMs = _savedResumePosition();
-      _resumeDone = _resumeTargetMs <= 0;
-
-      _setupSubtitles(res.subtitles);
-      _controller ??= _buildController();
-      await _controller!.setupDataSource(_hlsSource(playback.url));
-      if (token != _sourceToken) return;
-      // If the user backed out while the source was still preparing, tear the
-      // controller down here and don't start anything — otherwise it would sit
-      // ready and (previously) auto-play on a screen that no longer exists.
-      if (_disposed) {
-        _controller?.pause();
-        _controller?.dispose(forceDispose: true);
-        return;
-      }
-      // Seamless resume: silence playback from the very start so the opening
-      // that would otherwise play before the tick seeks to the saved position is
-      // never heard (the loader already hides the video). Unmuted the instant
-      // the seek lands on the resume point.
-      if (_resumeTargetMs > 0) {
-        await _controller?.setVolume(0);
-      }
+      await meta;
+      if (token != _sourceToken || _disposed) return;
+      if (!started) _retryOrError('No playable source found');
     } catch (_) {
       if (token != _sourceToken) return;
       _retryOrError('Playback error');
     }
+  }
+
+  String? _urlAt(int index) {
+    if (index < 0 || index >= _mirrors.length) return null;
+    return _mirrors[index].hlsUrl;
+  }
+
+  int _indexOfUrl(List<StreamMirror> mirrors, String? url) {
+    if (url == null || url.isEmpty) return -1;
+    return mirrors.indexWhere((mirror) => mirror.hlsUrl == url);
+  }
+
+  /// Title, episode name, and next/previous. Runs beside the source queue so
+  /// the first playable file does not wait on the catalog.
+  Future<void> _loadPlaybackMeta(MediaRepository repo, int token) async {
+    if (_mediaTitle == null) {
+      try {
+        final d = await repo.details(_type, _tmdbId, extras: false);
+        if (token != _sourceToken || _disposed) return;
+        _mediaTitle = d.title;
+        _posterPath = d.posterPath;
+        _backdropPath = d.backdropPath;
+        _isTv = d.isTv;
+        _seasons = d.seasons;
+        if (mounted) setState(() {});
+      } catch (_) {}
+    }
+    if (token != _sourceToken || _disposed) return;
+    if (_type == 'tv' && _episode != null) {
+      try {
+        final eps = await repo.episodes(_tmdbId, _season ?? 1);
+        if (token != _sourceToken || _disposed) return;
+        final match = eps.where((e) => e.episodeNumber == _episode);
+        _episodeName = match.isNotEmpty ? match.first.name : null;
+        _episodeStillPath = match.isNotEmpty ? match.first.stillPath : null;
+        if (mounted) setState(() {});
+      } catch (_) {
+        _episodeName = null;
+      }
+    }
+    if (token != _sourceToken || _disposed) return;
+    _computeEpisodeRefs();
+    if (_type == 'tv' && _season != null && _episode != null) {
+      _fetchSegments(_season!, _episode!);
+    }
+    if (mounted) setState(() {});
   }
 
   BetterPlayerDataSource _hlsSource(String url) {
@@ -483,9 +533,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }
     final mirror = _mirrors[index];
     final pos = _position.inMilliseconds;
-    await MirrorPrefStore.save(_type, _tmdbId, mirror.source);
+    await MirrorPrefStore.save(
+      _type,
+      _tmdbId,
+      mirror.source,
+      _type == 'tv' ? _season : null,
+    );
     if (!mounted || _disposed) return;
-    final token = ++_sourceToken;
+    final token = ++_attachToken;
     _resumeTargetMs = pos;
     _resumeDone = pos <= 800;
     _resumeSeekAtMs = 0;
@@ -500,14 +555,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (pos > 800) {
       await _controller?.setVolume(0);
     }
-    if (token != _sourceToken || _disposed) return;
+    if (token != _attachToken || _disposed) return;
     try {
       _controller ??= _buildController();
       await _controller!.setupDataSource(_hlsSource(mirror.hlsUrl));
-      if (token != _sourceToken || _disposed) return;
+      if (token != _attachToken || _disposed) return;
       _restartHideTimer();
     } catch (_) {
-      if (token != _sourceToken || !mounted) return;
+      if (token != _attachToken || !mounted) return;
       setState(() {
         _errorMsg = 'Playback error';
         _loading = false;
@@ -543,7 +598,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   // ---- Subtitles ---------------------------------------------------------
 
-  void _setupSubtitles(List<String> apiUrls) {
+  void _applySubtitleUrls(List<String> apiUrls) {
     final saved = SavedSubtitleStore.get(
       _type,
       _tmdbId,
@@ -560,11 +615,33 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         language: saved.language,
       ));
     }
+    final previous = (_activeSubIndex >= 0 && _activeSubIndex < _subOptions.length)
+        ? _subOptions[_activeSubIndex].uri
+        : null;
     _subOptions = [
       ...apiSubtitleOptions(apiUrls),
       ..._uploadedSubs,
       ...savedOptions,
     ];
+    if (previous != null) {
+      final kept = _subOptions.indexWhere((opt) => opt.uri == previous);
+      if (kept >= 0) {
+        _activeSubIndex = kept;
+        if (mounted) setState(() {});
+        return;
+      }
+    }
+    if (_subOptions.isEmpty) {
+      if (SubtitlePrefStore.get(_type, _tmdbId, _season)?.off == true) {
+        _pickedSubtitle = true;
+      }
+      if (mounted) setState(() {});
+      return;
+    }
+    if (_pickedSubtitle) {
+      if (mounted) setState(() {});
+      return;
+    }
     _selectSubtitle(_defaultSubtitleIndex(_subOptions), remember: false);
   }
 
@@ -572,6 +649,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   /// its cues in the background. Guarded by a token so switching tracks quickly
   /// never lets a slow earlier load overwrite a newer one.
   Future<void> _selectSubtitle(int index, {bool remember = true}) async {
+    _pickedSubtitle = true;
     _activeSubIndex = index;
     final token = ++_subLoadToken;
     final prev = SubtitlePrefStore.get(_type, _tmdbId, _season);
@@ -931,9 +1009,16 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   void _playEpisode(_EpisodeRef ref) {
     _noteWatchedMilestone(_position.inMilliseconds, _duration.inMilliseconds);
     _notedWatched = false;
+    _saveProgress();
     // Pause the current episode straight away so it doesn't keep playing (audio
     // + video) behind the loading spinner while the next one is resolved.
     _controller?.pause();
+    _resumeDone = false;
+    _awaitingFreshClock = true;
+    _resumeTargetMs = 0;
+    _resumeSeekAtMs = 0;
+    _position = Duration.zero;
+    _duration = Duration.zero;
     setState(() {
       _season = ref.season;
       _episode = ref.episode;
@@ -1008,10 +1093,19 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       // resumes) audio when the app isn't on screen. Deferred to the next tick
       // once foregrounded.
       if (!_backgrounded) {
+        if (_awaitingFreshClock &&
+            v.initialized &&
+            _position.inMilliseconds < 3000) {
+          // The new episode's clock has reset. Until then this value is still
+          // the previous episode, which must not be saved under the new one.
+          _awaitingFreshClock = false;
+          if (_resumeTargetMs <= 0) _resumeDone = true;
+        }
         // Apply the resume seek only once playback is genuinely advancing;
         // seeking earlier (on init) stalls ExoPlayer. This is the same path as
         // a manual seek, which works reliably.
         if (!_resumeDone &&
+            !_awaitingFreshClock &&
             _resumeTargetMs > 0 &&
             _position.inMilliseconds >= 800) {
           _resumeDone = true;
@@ -1141,7 +1235,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   void _saveProgress() {
     if (_mode != PlayerMode.stream) return;
-    if (!_resumeDone) return;
+    if (!_resumeDone || _awaitingFreshClock) return;
     final pos = _position.inMilliseconds;
     final dur = _duration.inMilliseconds;
     if (dur <= 0) return;

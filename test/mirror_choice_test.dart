@@ -28,39 +28,43 @@ void main() {
         mirrors: const [catflix, superstream, vaplayer],
       );
 
-  test('saved source is used when that mirror exists', () {
-    final pick = pickPlayback(sample(), 'catflix');
-    expect(pick!.url, catflix.hlsUrl);
-    expect(pick.index, 0);
+  test('nothing saved starts at vaplayer and still asks for the others', () {
+    expect(playbackSourceQueue(null).first, 'vaplayer');
+    expect(playbackSourceQueue(''), playbackSources);
+    expect(playbackSourceQueue(null), isNot(contains('nashville')));
   });
 
-  test('a missing saved source falls back to vaplayer', () {
-    final res = ExtractResponse(
+  test('a saved source is requested first', () {
+    final queue = playbackSourceQueue('Catflix');
+    expect(queue.first, 'catflix');
+    expect(queue, contains('vaplayer'));
+    expect(queue.where((source) => source == 'catflix'), hasLength(1));
+  });
+
+  test('a pinned response keeps that provider, and vaplayer keeps nashville', () {
+    final mixed = ExtractResponse(
       success: true,
       hlsUrl: catflix.hlsUrl,
+      source: 'catflix',
       mirrors: const [catflix, vaplayer],
     );
-    final pick = pickPlayback(res, 'superstream');
-    expect(pick!.url, vaplayer.hlsUrl);
-    expect(pick.index, 1);
-    expect(needsVaplayerRetry(res, 'superstream', pick), isFalse);
-  });
-
-  test('asks for vaplayer again when the list does not include it', () {
-    final res = ExtractResponse(
+    expect(mirrorsForPinned(mixed, 'catflix'), [catflix]);
+    final fallback = ExtractResponse(
       success: true,
-      hlsUrl: catflix.hlsUrl,
-      mirrors: const [catflix],
+      hlsUrl: 'https://cdn/nashville.m3u8',
+      source: 'nashville',
+      quality: '1080p',
+      mirrors: const [
+        StreamMirror(
+          hlsUrl: 'https://cdn/nashville.m3u8',
+          source: 'nashville',
+          quality: '1080p',
+        ),
+        catflix,
+      ],
     );
-    final pick = pickPlayback(res, 'superstream');
-    expect(pick!.url, catflix.hlsUrl);
-    expect(needsVaplayerRetry(res, 'superstream', pick), isTrue);
-  });
-
-  test('no saved source plays the response url', () {
-    final pick = pickPlayback(sample(hlsUrl: superstream.hlsUrl), null);
-    expect(pick!.url, superstream.hlsUrl);
-    expect(pick.index, 1);
+    final kept = mirrorsForPinned(fallback, 'vaplayer');
+    expect(kept.map((mirror) => mirror.source), ['nashville']);
   });
 
   test('button labels show the provider and quality', () {
@@ -69,26 +73,52 @@ void main() {
     expect(mirrorButtonLabel(2, vaplayer), 'Vaplayer 720p');
   });
 
-  test('a filtered source response still keeps the full mirror list', () async {
-    final calls = <String?>[];
-    final resolved = await resolvePlayback(
-      preferred: 'catflix',
+  test('sources load one at a time and playback starts on the saved one', () async {
+    final calls = <String>[];
+    final slices = await playbackSlices(
+      preferred: 'flixhq',
       extract: (source) async {
         calls.add(source);
-        if (source == 'catflix') {
+        if (source == 'flixhq') {
           return const ExtractResponse(
             success: true,
-            hlsUrl: 'https://cdn/catflix.m3u8',
-            mirrors: [catflix],
+            hlsUrl: 'https://cdn/flix.m3u8',
+            source: 'flixhq',
+            subtitles: ['https://subs/flix.srt&release=flixhq.en'],
+            mirrors: [
+              StreamMirror(
+                hlsUrl: 'https://cdn/flix.m3u8',
+                source: 'flixhq',
+                quality: '1080p',
+              ),
+            ],
           );
         }
-        return sample();
+        if (source == 'vaplayer') {
+          return const ExtractResponse(
+            success: true,
+            hlsUrl: 'https://cdn/vaplayer.m3u8',
+            source: 'vaplayer',
+            subtitles: ['https://subs/va.srt&release=vaplayer.en'],
+            mirrors: [vaplayer],
+          );
+        }
+        return const ExtractResponse(success: false);
       },
-    );
-    expect(calls, ['catflix', null]);
-    expect(resolved!.url, catflix.hlsUrl);
-    expect(resolved.index, 0);
-    expect(resolved.response.mirrors, [catflix, superstream, vaplayer]);
+    ).toList();
+    expect(calls.first, 'flixhq');
+    expect(calls[1], 'vaplayer');
+    expect(calls, isNot(contains(null)));
+    expect(slices.first.playUrl, 'https://cdn/flix.m3u8');
+    expect(slices.first.playIndex, 0);
+    expect(slices.first.subtitles, ['https://subs/flix.srt&release=flixhq.en']);
+    final last = slices.last;
+    expect(last.playUrl, isNull);
+    expect(last.mirrors.map((mirror) => mirror.source), ['flixhq', 'vaplayer']);
+    expect(last.subtitles, [
+      'https://subs/flix.srt&release=flixhq.en',
+      'https://subs/va.srt&release=vaplayer.en',
+    ]);
   });
 
   testWidgets('select key activates the focused mirror', (tester) async {

@@ -2,6 +2,7 @@ import 'dart:ui' show ImageFilter;
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/dates.dart';
@@ -696,16 +697,21 @@ class _FocusBackButtonState extends State<_FocusBackButton> {
 
   @override
   Widget build(BuildContext context) {
-    return FocusableActionDetector(
+    return Focus(
+      autofocus: false,
       onFocusChange: (f) => setState(() => _focused = f),
-      mouseCursor: SystemMouseCursors.click,
-      actions: {
-        ActivateIntent: CallbackAction<ActivateIntent>(
-          onInvoke: (_) {
-            widget.onTap();
-            return null;
-          },
-        ),
+      onKeyEvent: (node, event) {
+        if (event is! KeyDownEvent) return KeyEventResult.ignored;
+        final keys = {
+          LogicalKeyboardKey.enter,
+          LogicalKeyboardKey.numpadEnter,
+          LogicalKeyboardKey.select,
+          LogicalKeyboardKey.space,
+          LogicalKeyboardKey.gameButtonA,
+        };
+        if (!keys.contains(event.logicalKey)) return KeyEventResult.ignored;
+        widget.onTap();
+        return KeyEventResult.handled;
       },
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,

@@ -4,7 +4,6 @@ import '../../core/focus.dart';
 import '../../core/theme.dart';
 import '../../data/auth/auth_service.dart';
 import '../../data/sync/sync_service.dart';
-import 'access_dialogs.dart';
 
 enum AuthMode { login, register }
 
@@ -13,17 +12,25 @@ enum AuthMode { login, register }
 /// field moves to the NEXT field (not the button), and fields scroll clear of
 /// the on-screen keyboard. Signing in syncs this device with the account.
 class AuthPanel extends StatefulWidget {
-  const AuthPanel({super.key, this.onAuthenticated});
+  const AuthPanel({
+    super.key,
+    this.onAuthenticated,
+    this.showSkip = false,
+    this.onSkip,
+    this.initialMode = AuthMode.register,
+  });
 
   final VoidCallback? onAuthenticated;
+  final bool showSkip;
+  final VoidCallback? onSkip;
+  final AuthMode initialMode;
 
   @override
   State<AuthPanel> createState() => _AuthPanelState();
 }
 
 class _AuthPanelState extends State<AuthPanel> {
-  // Registration stays closed. A register initial mode still opens on login.
-  late AuthMode _mode = AuthMode.login;
+  late AuthMode _mode = widget.initialMode;
   final _username = TextEditingController();
   final _identifier = TextEditingController();
   final _password = TextEditingController();
@@ -119,7 +126,7 @@ class _AuthPanelState extends State<AuthPanel> {
             _ModeTab(
               label: 'Login',
               selected: !isRegister,
-              autofocus: true,
+              autofocus: widget.initialMode == AuthMode.login,
               onTap: () => setState(() {
                 _mode = AuthMode.login;
                 _error = null;
@@ -128,9 +135,12 @@ class _AuthPanelState extends State<AuthPanel> {
             const SizedBox(width: 12),
             _ModeTab(
               label: 'Register',
-              selected: false,
-              muted: true,
-              onTap: () => showRegistrationClosedDialog(context),
+              selected: isRegister,
+              autofocus: widget.initialMode == AuthMode.register,
+              onTap: () => setState(() {
+                _mode = AuthMode.register;
+                _error = null;
+              }),
             ),
           ],
         ),
@@ -191,6 +201,14 @@ class _AuthPanelState extends State<AuthPanel> {
               : (isRegister ? 'Create Account' : 'Sign In'),
           onTap: _busy ? null : _submit,
         ),
+        if (widget.showSkip) ...[
+          const SizedBox(height: 14),
+          _PillButton(
+            label: 'Skip for now',
+            filled: false,
+            onTap: _busy ? null : widget.onSkip,
+          ),
+        ],
       ],
     );
   }
@@ -204,13 +222,11 @@ class _ModeTab extends StatefulWidget {
     required this.selected,
     required this.onTap,
     this.autofocus = false,
-    this.muted = false,
   });
   final String label;
   final bool selected;
   final VoidCallback onTap;
   final bool autofocus;
-  final bool muted;
 
   @override
   State<_ModeTab> createState() => _ModeTabState();
@@ -231,24 +247,21 @@ class _ModeTabState extends State<_ModeTab> {
       child: FocusRing(
         focused: _focused,
         radius: 23,
-        child: Opacity(
-          opacity: widget.muted ? 0.45 : 1,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 10),
-            decoration: BoxDecoration(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 10),
+          decoration: BoxDecoration(
+            color: widget.selected
+                ? AppColors.textPrimary
+                : AppColors.charcoalLight,
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Text(
+            widget.label,
+            style: TextStyle(
               color: widget.selected
-                  ? AppColors.textPrimary
-                  : AppColors.charcoalLight,
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Text(
-              widget.label,
-              style: TextStyle(
-                color: widget.selected
-                    ? AppColors.charcoal
-                    : AppColors.textSecondary,
-                fontWeight: FontWeight.w600,
-              ),
+                  ? AppColors.charcoal
+                  : AppColors.textSecondary,
+              fontWeight: FontWeight.w600,
             ),
           ),
         ),
@@ -346,9 +359,11 @@ class _PillButton extends StatefulWidget {
   const _PillButton({
     required this.label,
     required this.onTap,
+    this.filled = true,
   });
   final String label;
   final VoidCallback? onTap;
+  final bool filled;
 
   @override
   State<_PillButton> createState() => _PillButtonState();
@@ -371,13 +386,17 @@ class _PillButtonState extends State<_PillButton> {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 12),
           decoration: BoxDecoration(
-            color: AppColors.textPrimary,
+            color: widget.filled
+                ? AppColors.textPrimary
+                : AppColors.charcoalLight,
             borderRadius: BorderRadius.circular(8),
           ),
           child: Text(
             widget.label,
-            style: const TextStyle(
-              color: AppColors.charcoal,
+            style: TextStyle(
+              color: widget.filled
+                  ? AppColors.charcoal
+                  : AppColors.textPrimary,
               fontWeight: FontWeight.w600,
             ),
           ),

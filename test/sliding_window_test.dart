@@ -38,18 +38,10 @@ void main() {
 
     await tester.tap(find.text('See more'));
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-
-    expect(find.text('ep-0'), findsNothing);
-    expect(find.text('ep-5'), findsOneWidget);
-    expect(find.text('See more'), findsNWidgets(2));
-
-    await tester.tap(find.text('See more').first);
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('ep-0'), findsOneWidget);
-    expect(find.text('ep-5'), findsNothing);
+    expect(find.text('ep-5'), findsOneWidget);
+    expect(find.text('See more'), findsOneWidget);
     await tester.pumpAndSettle();
   });
 
@@ -112,18 +104,21 @@ void main() {
 
     await tester.tap(find.text('See more'));
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('like-0'), findsOneWidget);
     expect(find.text('like-9'), findsOneWidget);
     expect(find.text('like-10'), findsNothing);
-    expect(find.text('See more'), findsNWidgets(2));
+    expect(find.text('See more'), findsOneWidget);
 
-    await tester.tap(find.text('See more').last);
+    await tester.scrollUntilVisible(
+      find.text('See more'),
+      500,
+      scrollable: find.byType(Scrollable),
+    );
+    await tester.tap(find.text('See more'));
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
 
-    expect(find.text('like-0'), findsNothing);
+    expect(find.text('like-0'), findsOneWidget);
     expect(find.text('like-5'), findsOneWidget);
     expect(find.text('like-14'), findsOneWidget);
     expect(find.text('like-15'), findsNothing);
@@ -147,15 +142,16 @@ void main() {
     expect(find.text('ep-0'), findsOneWidget);
     expect(find.text('ep-9'), findsOneWidget);
     expect(find.text('ep-10'), findsNothing);
+    expect(find.text('See more'), findsOneWidget);
 
     await tester.tap(find.text('See more'));
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
 
-    expect(find.text('ep-0'), findsNothing);
+    expect(find.text('ep-0'), findsOneWidget);
     expect(find.text('ep-5'), findsOneWidget);
     expect(find.text('ep-14'), findsOneWidget);
     expect(find.text('ep-15'), findsNothing);
+    expect(find.text('See more'), findsOneWidget);
     await tester.pumpAndSettle();
   });
 }

@@ -6,8 +6,8 @@ import '../../data/models/media_item.dart';
 import 'continue_watching_row.dart';
 import 'poster_card.dart';
 
-/// A titled row of poster cards. See more keeps the row one line tall and
-/// slides five titles at a time.
+/// A titled row of poster cards. The row scrolls, and See more appends the
+/// next titles without moving the ones already on screen.
 class CategoryRowSection extends StatefulWidget {
   const CategoryRowSection({
     super.key,

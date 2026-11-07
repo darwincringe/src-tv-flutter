@@ -71,6 +71,9 @@
        plays HLS natively). Bundled locally so there's no runtime CDN/CSP dep. -->
   <script src="hls.min.js"></script>
   <script src="speech_align.js"></script>
+  <!-- No-op in a normal browser. The TV package uses it so the remote moves
+       focus instead of scrolling the page. -->
+  <script src="tizen_keys.js"></script>
 </head>
 <body>
   <noscript>

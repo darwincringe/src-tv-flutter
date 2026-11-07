@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../core/focus.dart';
 import '../../core/theme.dart';
@@ -63,6 +64,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
               const SizedBox(height: 24),
               if (AuthService.isSignedIn) _signedIn() else _signedOut(),
+              const SizedBox(height: 8),
+              TextButton(
+                onPressed: () => context.go('/privacy'),
+                child: const Text('Privacy Policy'),
+              ),
             ],
           ),
         ),

@@ -106,6 +106,11 @@ class _EpisodeRef {
   const _EpisodeRef(this.season, this.episode);
 }
 
+/// The TV package is still this web player. Arrow keys there must open the
+/// controls and move a visible focus ring, the same way the Android remote
+/// does. Seeking starts only after the timeline is focused and selected.
+const _tizenWeb = bool.fromEnvironment('TIZEN_WEB');
+
 /// Web build of the player (same public name/constructor as the native
 /// PlayerScreen; selected via the conditional export in player_view.dart).
 /// HTML5 <video> + hls.js with the app's own overlay controls: resume/progress
@@ -130,6 +135,22 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   bool _playing = false;
   bool _showControls = true;
   bool _fullscreen = false;
+  final FocusScopeNode _rootScope = FocusScopeNode(debugLabel: 'player-root');
+  final FocusNode _backFocus = FocusNode(debugLabel: 'back');
+  final FocusNode _prevFocus = FocusNode(debugLabel: 'prev');
+  final FocusNode _rewFocus = FocusNode(debugLabel: 'rew');
+  final FocusNode _playPauseFocus = FocusNode(debugLabel: 'playpause');
+  final FocusNode _ffFocus = FocusNode(debugLabel: 'ff');
+  final FocusNode _nextFocus = FocusNode(debugLabel: 'next');
+  final FocusNode _seekFocus = FocusNode(debugLabel: 'seek');
+  final FocusNode _soundFocus = FocusNode(debugLabel: 'sound');
+  final FocusNode _qualityFocus = FocusNode(debugLabel: 'quality');
+  final FocusNode _subFocus = FocusNode(debugLabel: 'subs');
+  final FocusNode _fullFocus = FocusNode(debugLabel: 'fullscreen');
+  final FocusNode _skipFocus = FocusNode(debugLabel: 'skip');
+  bool _scrubbing = false;
+  int _scrubPreviewMs = 0;
+  bool _wasPlayingBeforeScrub = false;
   late final JSFunction _fsListener;
 
   // iOS (all browsers are WebKit): no element Fullscreen API, so we use the
@@ -148,6 +169,14 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   bool _resumeDone = true;
   bool _notedWatched = false;
   bool _metadataSeekDone = false;
+
+  // Progress for one episode must not be written against another. The video
+  // element keeps the previous episode's clock until the new file loads, so
+  // saves stay closed across that gap.
+  int _mediaToken = 0;
+  int _metadataToken = -1;
+  bool _progressReady = false;
+  bool _pickedSubtitle = false;
 
   // Series / episode nav.
   bool _isTv = false;
@@ -187,6 +216,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   bool _audioTapFailed = false;
   SoundMode _soundMode = SoundMode.off;
   JSFunction? _gestureKick;
+  JSFunction? _remoteBackFn;
 
   Timer? _ticker;
   Timer? _hideTimer;
@@ -199,6 +229,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   void initState() {
     super.initState();
     PlayerRuntime.isOpen = true;
+    _bindRemoteBack();
     _soundMode = SoundPrefStore.mode;
     // A saved booster can't start until the browser sees a click or key,
     // because routing the video through Web Audio needs that gesture.
@@ -246,6 +277,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   Future<void> _load() async {
+    final token = _mediaToken;
     if (_a.mode != PlayerMode.stream || _a.tmdbId == null || _a.type == null) {
       setState(() {
         _loading = false;
@@ -254,10 +286,27 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
       return;
     }
     _loadOffset();
+    _pickedSubtitle = false;
+    _applyMirrors(const [], -1);
     try {
       final repo = ref.read(mediaRepositoryProvider);
-      final playback = await resolvePlayback(
-        preferred: MirrorPrefStore.get(_a.type!, _a.tmdbId!),
+      final meta = _loadPlaybackMeta(repo, token);
+      List<String> wyzie = const [];
+      try {
+        wyzie = await repo.englishSubtitles(
+          _a.type!,
+          _a.tmdbId!,
+          season: _season,
+          episode: _episode,
+        );
+      } catch (_) {}
+      if (!mounted || token != _mediaToken) return;
+      _applySubtitleUrls(wyzie);
+
+      final season = _a.type == 'tv' ? _season : null;
+      var started = false;
+      await for (final slice in playbackSlices(
+        preferred: MirrorPrefStore.get(_a.type!, _a.tmdbId!, season),
         extract: (source) => repo.streamSource(
           _a.type!,
           _a.tmdbId!,
@@ -265,63 +314,114 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
           episode: _episode,
           source: source,
         ),
-      );
-      if (!mounted) return;
-      if (playback == null) {
+      )) {
+        if (!mounted || token != _mediaToken) return;
+        _applySubtitleUrls(mergeSubtitleUrls(wyzie, slice.subtitles));
+        if (!started && slice.playUrl != null) {
+          started = true;
+          _applyMirrors(slice.mirrors, slice.playIndex);
+          _resumeTargetMs = _savedResumePosition();
+          // Stay closed until this file's own metadata event. A 0 here means
+          // the saved record belongs to a different episode, so playback starts
+          // over.
+          _resumeDone = false;
+          _progressReady = false;
+          _metadataSeekDone = false;
+          _metadataToken = token;
+          _attach(slice.playUrl!);
+          setState(() {});
+        } else {
+          final playing = _urlAt(_mirrorIndex);
+          _applyMirrors(slice.mirrors, _indexOfUrl(slice.mirrors, playing));
+          if (mounted) setState(() {});
+        }
+      }
+      await meta;
+      if (!mounted || token != _mediaToken) return;
+      if (!started) {
         setState(() {
           _loading = false;
           _errorMsg = 'No playable source found';
         });
-        return;
       }
-      final res = playback.response;
-      _applyMirrors(res.mirrors, playback.index);
-
-      // Details once (title, isTv, seasons for episode nav).
-      if (_title == null) {
-        try {
-          final d = await repo.details(_a.type!, _a.tmdbId!, extras: false);
-          _title = d.title;
-          _isTv = d.isTv;
-          _seasons = d.seasons;
-        } catch (_) {}
-      }
-      // Episode name for the header.
-      if (_isTv && _episode != null) {
-        try {
-          final eps = await repo.episodes(_a.tmdbId!, _season ?? 1);
-          final m = eps.where((e) => e.episodeNumber == _episode);
-          _episodeName = m.isNotEmpty ? m.first.name : null;
-        } catch (_) {
-          _episodeName = null;
-        }
-      }
-
-      _computeEpisodeRefs();
-      _resumeTargetMs = _savedResumePosition();
-      _resumeDone = _resumeTargetMs <= 0;
-      _subs = _withSavedSubtitle(
-        [...apiSubtitleOptions(res.subtitles), ..._uploaded],
-      );
-      // Apply the remembered choice (per-season for TV / per-title for movies),
-      // else default to English. Not saved — only user picks persist.
-      _selectSubtitle(_initialSubtitleIndex(), save: false);
-
-      if (!mounted) return;
-      _attach(playback.url);
-      if (_isTv && _season != null && _episode != null) {
-        _fetchSegments(_season!, _episode!);
-      }
-      _startTicker();
-      setState(() {});
     } catch (_) {
-      if (mounted) {
+      if (mounted && token == _mediaToken) {
         setState(() {
           _loading = false;
           _errorMsg = 'Playback error';
         });
       }
     }
+  }
+
+  String? _urlAt(int index) {
+    if (index < 0 || index >= _mirrors.length) return null;
+    return _mirrors[index].hlsUrl;
+  }
+
+  int _indexOfUrl(List<StreamMirror> mirrors, String? url) {
+    if (url == null || url.isEmpty) return -1;
+    return mirrors.indexWhere((mirror) => mirror.hlsUrl == url);
+  }
+
+  Future<void> _loadPlaybackMeta(MediaRepository repo, int token) async {
+    if (_title == null && _a.tmdbId != null && _a.type != null) {
+      try {
+        final d = await repo.details(_a.type!, _a.tmdbId!, extras: false);
+        if (!mounted || token != _mediaToken) return;
+        _title = d.title;
+        _isTv = d.isTv;
+        _seasons = d.seasons;
+      } catch (_) {}
+    }
+    if (!mounted || token != _mediaToken) return;
+    if (_isTv && _episode != null && _a.tmdbId != null) {
+      try {
+        final eps = await repo.episodes(_a.tmdbId!, _season ?? 1);
+        if (!mounted || token != _mediaToken) return;
+        final match = eps.where((e) => e.episodeNumber == _episode);
+        _episodeName = match.isNotEmpty ? match.first.name : null;
+      } catch (_) {
+        _episodeName = null;
+      }
+    }
+    if (!mounted || token != _mediaToken) return;
+    _computeEpisodeRefs();
+    if (_isTv && _season != null && _episode != null && _a.tmdbId != null) {
+      _fetchSegments(_season!, _episode!);
+    }
+    if (mounted) setState(() {});
+  }
+
+  void _applySubtitleUrls(List<String> apiUrls) {
+    final previous = (_subIndex >= 0 && _subIndex < _subs.length)
+        ? _subs[_subIndex].uri
+        : null;
+    _subs = _withSavedSubtitle(
+      [...apiSubtitleOptions(apiUrls), ..._uploaded],
+    );
+    if (previous != null) {
+      final kept = _subs.indexWhere((opt) => opt.uri == previous);
+      if (kept >= 0) {
+        _subIndex = kept;
+        if (mounted) setState(() {});
+        return;
+      }
+    }
+    if (_subs.isEmpty) {
+      if (_a.type != null &&
+          _a.tmdbId != null &&
+          SubtitlePrefStore.get(_a.type!, _a.tmdbId!, _season)?.off == true) {
+        _pickedSubtitle = true;
+      }
+      if (mounted) setState(() {});
+      return;
+    }
+    if (_pickedSubtitle) {
+      if (mounted) setState(() {});
+      return;
+    }
+    _selectSubtitle(_initialSubtitleIndex(), save: false);
   }
 
   void _applyMirrors(List<StreamMirror> mirrors, int index) {
@@ -341,11 +441,18 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
     }
     final mirror = _mirrors[index];
     final pos = _positionMs;
-    MirrorPrefStore.save(_a.type!, _a.tmdbId!, mirror.source);
+    MirrorPrefStore.save(
+      _a.type!,
+      _a.tmdbId!,
+      mirror.source,
+      _a.type == 'tv' ? _season : null,
+    );
     // Keep the timestamp across the source change. loadedmetadata applies it.
     _resumeTargetMs = pos;
-    _metadataSeekDone = pos <= 0;
-    _resumeDone = pos <= 0;
+    _metadataSeekDone = false;
+    _metadataToken = _mediaToken;
+    _resumeDone = false;
+    _progressReady = false;
     setState(() => _mirrorIndex = index);
     _attach(mirror.hlsUrl);
     _restartHideTimer();
@@ -435,6 +542,16 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
     _noteWatchedMilestone(_positionMs, _durationMs);
     _notedWatched = false;
     _saveProgress();
+    // Close the books before the episode number changes. Otherwise the ticker
+    // writes this episode's clock onto the next one, and the next file opens
+    // at the previous ending.
+    _mediaToken++;
+    _metadataToken = -1;
+    _resumeDone = false;
+    _progressReady = false;
+    _resumeTargetMs = 0;
+    _metadataSeekDone = true;
+    _ticker?.cancel();
     _video.pause();
     _subToken++; // cancel any in-flight subtitle load
     setState(() {
@@ -442,7 +559,6 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
       _episode = ref.episode;
       _episodeName = null;
       _loading = true;
-      _metadataSeekDone = false;
       _durationMs = 0;
       _positionMs = 0;
       _bufferedFraction = 0;
@@ -471,13 +587,20 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
 
   // ---- lifecycle events --------------------------------------------------
   void _onLoadedMetadata(web.Event _) {
+    if (_metadataToken != _mediaToken) return;
+    _metadataToken = -1;
     final durSec = _video.duration;
     if (durSec.isFinite && durSec > 0) _durationMs = (durSec * 1000).round();
-    if (!_metadataSeekDone && _resumeTargetMs > 0) {
+    if (!_metadataSeekDone) {
       _metadataSeekDone = true;
+      // A different episode always starts at its own saved point, or at 0.
+      // Assigning 0 also clears a currentTime left behind by the previous file.
       _video.currentTime = _resumeTargetMs / 1000.0;
-      _resumeDone = true;
+      _positionMs = _resumeTargetMs;
     }
+    _resumeDone = true;
+    _progressReady = true;
+    _startTicker();
     _video.play();
     if (mounted) setState(() => _loading = false);
     _restartHideTimer();
@@ -591,7 +714,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   void _saveProgress() {
-    if (_a.mode != PlayerMode.stream || !_resumeDone) return;
+    if (_a.mode != PlayerMode.stream || !_resumeDone || !_progressReady) return;
     final dur = _durationMs;
     if (dur <= 0) return;
     // Closing or the periodic save must keep this episode, even in the credits.
@@ -737,6 +860,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   Future<void> _selectSubtitle(int index, {bool save = true}) async {
+    _pickedSubtitle = true;
     _subToken++;
     setState(() {
       _subIndex = index;
@@ -1163,8 +1287,70 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   void _toggleControls() {
+    if (_tizenWeb && _showControls) {
+      _hideControls();
+      return;
+    }
+    if (_tizenWeb) {
+      _revealControls();
+      return;
+    }
     setState(() => _showControls = !_showControls);
     if (_showControls) _restartHideTimer();
+  }
+
+  void _revealControls() {
+    final wasHidden = !_showControls;
+    if (wasHidden) setState(() => _showControls = true);
+    _restartHideTimer();
+    if (_tizenWeb && wasHidden) _focusPlay();
+  }
+
+  void _focusPlay() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _playPauseFocus.canRequestFocus) {
+        _playPauseFocus.requestFocus();
+      }
+    });
+  }
+
+  void _hideControls() {
+    _hideTimer?.cancel();
+    setState(() {
+      _showControls = false;
+      _scrubbing = false;
+    });
+    _rootScope.requestFocus();
+  }
+
+  void _enterScrub() {
+    _scrubPreviewMs = _positionMs;
+    _wasPlayingBeforeScrub = _playing;
+    _video.pause();
+    setState(() => _scrubbing = true);
+    _restartHideTimer();
+  }
+
+  void _scrubStep(int deltaMs) {
+    final dur = _durationMs;
+    var t = _scrubPreviewMs + deltaMs;
+    if (t < 0) t = 0;
+    if (dur > 0 && t > dur) t = dur;
+    setState(() => _scrubPreviewMs = t);
+    _restartHideTimer();
+  }
+
+  void _commitScrub() {
+    _seekToMs(_scrubPreviewMs);
+    setState(() => _scrubbing = false);
+    if (_playPauseFocus.canRequestFocus) _playPauseFocus.requestFocus();
+  }
+
+  void _cancelScrub() {
+    if (_wasPlayingBeforeScrub) _video.play();
+    setState(() => _scrubbing = false);
+    if (_playPauseFocus.canRequestFocus) _playPauseFocus.requestFocus();
+    _restartHideTimer();
   }
 
   void _restartHideTimer() {
@@ -1172,15 +1358,42 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
     if (!mounted) return;
     if (!_showControls) setState(() => _showControls = true);
     _hideTimer = Timer(const Duration(seconds: 4), () {
-      if (mounted && _playing) setState(() => _showControls = false);
+      if (!mounted || !_playing || _scrubbing) return;
+      setState(() => _showControls = false);
+      if (_tizenWeb) _rootScope.requestFocus();
     });
+  }
+
+  void _bindRemoteBack() {
+    if (!_tizenWeb) return;
+    _remoteBackFn = (() {
+      if (!mounted) return;
+      if (_showControls) {
+        if (_scrubbing && _wasPlayingBeforeScrub) _video.play();
+        _hideControls();
+        return;
+      }
+      _exit();
+    }).toJS;
+    web.window.setProperty('__srctvOnBack'.toJS, _remoteBackFn!);
+  }
+
+  void _unbindRemoteBack() {
+    if (!_tizenWeb) return;
+    web.window.setProperty('__srctvOnBack'.toJS, null);
   }
 
   Future<void> _exit() async {
     _saveProgress();
     PlayerRuntime.leftAt = _now;
     if (!context.mounted) return;
-    // On web (go-based nav) fall back to this title's details page.
+    // On the TV, the remote Back key leaves through browser history. The
+    // on-screen button has to do that too. The website path checks Flutter's
+    // history serial, which this packaged build does not fill in.
+    if (_tizenWeb) {
+      web.window.history.back();
+      return;
+    }
     final fb = (_a.type != null && _a.tmdbId != null)
         ? '/details/${_a.type}/${_a.tmdbId}'
         : '/home';
@@ -1257,6 +1470,24 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
     _saveProgress();
     PlayerRuntime.leftAt = _now;
     PlayerRuntime.isOpen = false;
+    _unbindRemoteBack();
+    _rootScope.dispose();
+    for (final node in [
+      _backFocus,
+      _prevFocus,
+      _rewFocus,
+      _playPauseFocus,
+      _ffFocus,
+      _nextFocus,
+      _seekFocus,
+      _soundFocus,
+      _qualityFocus,
+      _subFocus,
+      _fullFocus,
+      _skipFocus,
+    ]) {
+      node.dispose();
+    }
     web.document.removeEventListener('fullscreenchange', _fsListener);
     _clearIosTextTrack();
     try {
@@ -1288,8 +1519,12 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      body: Focus(
-        autofocus: true,
+      body: FocusScope(
+        node: _rootScope,
+        // On a TV the play button owns focus while the controls are up, so
+        // arrows can move between them. On the website this scope stays
+        // focused and the arrow keys seek.
+        autofocus: !_tizenWeb,
         onKeyEvent: _onKey,
         child: Stack(
           fit: StackFit.expand,
@@ -1329,6 +1564,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    if (_tizenWeb) return _onTvKey(event);
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
@@ -1376,6 +1612,186 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
+  }
+
+  bool _isSelectKey(LogicalKeyboardKey key) =>
+      key == LogicalKeyboardKey.space ||
+      key == LogicalKeyboardKey.enter ||
+      key == LogicalKeyboardKey.numpadEnter ||
+      key == LogicalKeyboardKey.select ||
+      key == LogicalKeyboardKey.mediaPlayPause ||
+      key == LogicalKeyboardKey.gameButtonA;
+
+  bool _isArrowKey(LogicalKeyboardKey key) =>
+      key == LogicalKeyboardKey.arrowLeft ||
+      key == LogicalKeyboardKey.arrowRight ||
+      key == LogicalKeyboardKey.arrowUp ||
+      key == LogicalKeyboardKey.arrowDown;
+
+  /// Remote behavior matching the Android player. The center button still
+  /// pauses while the controls are hidden. Any arrow only reveals the
+  /// controls and lands on play/pause. Seeking happens on the timeline,
+  /// after it is focused and selected.
+  KeyEventResult _onTvKey(KeyEvent event) {
+    // A sound, quality, or subtitle dialog is on top. Leave its keys alone.
+    if (ModalRoute.of(context)?.isCurrent != true) {
+      return KeyEventResult.ignored;
+    }
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.escape) {
+      if (web.document.fullscreenElement != null) {
+        _toggleFullscreen();
+      } else {
+        _exit();
+      }
+      return KeyEventResult.handled;
+    }
+    if (_errorMsg != null || _loading) return KeyEventResult.ignored;
+    final select = _isSelectKey(key);
+    final arrow = _isArrowKey(key);
+    if (!_showControls) {
+      if (_actionKind != null && select) {
+        _performAction();
+        return KeyEventResult.handled;
+      }
+      if (select) {
+        _togglePlay();
+        _focusPlay();
+        return KeyEventResult.handled;
+      }
+      if (arrow) {
+        _revealControls();
+        return KeyEventResult.handled;
+      }
+      return KeyEventResult.ignored;
+    }
+    if (_scrubbing) {
+      _restartHideTimer();
+      return KeyEventResult.ignored;
+    }
+    _restartHideTimer();
+    final focused = FocusManager.instance.primaryFocus;
+    if (focused == null || focused == _rootScope) {
+      if (select) {
+        _togglePlay();
+        return KeyEventResult.handled;
+      }
+      _playPauseFocus.requestFocus();
+      return KeyEventResult.handled;
+    }
+    if (arrow) {
+      _moveTvFocus(key);
+      return KeyEventResult.handled;
+    }
+    if (select && event is KeyDownEvent) {
+      _activateTv(focused);
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  List<List<FocusNode>> _tvRows() {
+    List<FocusNode> live(Iterable<FocusNode> nodes) =>
+        nodes.where((n) => n.context != null).toList();
+    final rows = <List<FocusNode>>[
+      live([_backFocus]),
+      live(_mirrorNodes),
+      live([
+        if (_isTv) _prevFocus,
+        _rewFocus,
+        _playPauseFocus,
+        _ffFocus,
+        if (_isTv) _nextFocus,
+      ]),
+      live([_seekFocus, _soundFocus, _qualityFocus, _subFocus, _fullFocus]),
+    ];
+    // Skip sits in the corner. It is its own stop so Left/Right on the
+    // timeline cannot leap over to it.
+    if (_skipFocus.context != null) rows.add([_skipFocus]);
+    rows.removeWhere((row) => row.isEmpty);
+    return rows;
+  }
+
+  void _moveTvFocus(LogicalKeyboardKey key) {
+    final rows = _tvRows();
+    final current = FocusManager.instance.primaryFocus;
+    var r = -1;
+    var c = -1;
+    for (var i = 0; i < rows.length; i++) {
+      final j = rows[i].indexOf(current ?? _rootScope);
+      if (j >= 0) {
+        r = i;
+        c = j;
+        break;
+      }
+    }
+    if (r < 0) {
+      _playPauseFocus.requestFocus();
+      return;
+    }
+    if (key == LogicalKeyboardKey.arrowLeft) {
+      if (c > 0) rows[r][c - 1].requestFocus();
+      return;
+    }
+    if (key == LogicalKeyboardKey.arrowRight) {
+      if (c + 1 < rows[r].length) rows[r][c + 1].requestFocus();
+      return;
+    }
+    final down = key == LogicalKeyboardKey.arrowDown;
+    if (!down && key != LogicalKeyboardKey.arrowUp) return;
+    // The timeline is wide. Down from it would land on Skip in the corner.
+    if (down && current == _seekFocus) return;
+    final next = r + (down ? 1 : -1);
+    if (next < 0 || next >= rows.length) return;
+    _closest(rows[next], rows[r][c]).requestFocus();
+  }
+
+  FocusNode _closest(List<FocusNode> row, FocusNode from) {
+    final origin = from.rect.center.dx;
+    var best = row.first;
+    var bestDx = double.infinity;
+    for (final node in row) {
+      final dx = (node.rect.center.dx - origin).abs();
+      if (dx < bestDx) {
+        bestDx = dx;
+        best = node;
+      }
+    }
+    return best;
+  }
+
+  void _activateTv(FocusNode focused) {
+    if (focused == _backFocus) {
+      _exit();
+    } else if (focused == _prevFocus && _prevRef != null) {
+      _playEpisode(_prevRef!);
+    } else if (focused == _rewFocus) {
+      _seekBy(-15000);
+    } else if (focused == _playPauseFocus) {
+      _togglePlay();
+    } else if (focused == _ffFocus) {
+      _seekBy(15000);
+    } else if (focused == _nextFocus && _nextRef != null) {
+      _playEpisode(_nextRef!);
+    } else if (focused == _seekFocus) {
+      _enterScrub();
+    } else if (focused == _soundFocus) {
+      _showSoundMenu();
+    } else if (focused == _qualityFocus) {
+      _showQualityMenu();
+    } else if (focused == _subFocus) {
+      _showSubtitleMenu();
+    } else if (focused == _fullFocus) {
+      _toggleFullscreen();
+    } else if (focused == _skipFocus) {
+      _performAction();
+    } else {
+      final mirror = _mirrorNodes.indexOf(focused);
+      if (mirror >= 0 && mirror < _mirrors.length) _selectMirror(mirror);
+    }
   }
 
   Widget _loaderOverlay() => Container(
@@ -1548,7 +1964,13 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
       right: 28,
       bottom: _showControls ? 132 : 48,
       child: PointerInterceptor(
-        child: _SkipButton(label: label, icon: icon, onTap: _performAction),
+        child: _SkipButton(
+          label: label,
+          icon: icon,
+          onTap: _performAction,
+          focusNode: _tizenWeb ? _skipFocus : null,
+          autofocus: !_tizenWeb,
+        ),
       ),
     );
   }
@@ -1573,10 +1995,17 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
               children: [
                 Row(
                   children: [
-                    IconButton(
-                      onPressed: _exit,
-                      icon: const Icon(Icons.arrow_back, color: Colors.white),
-                    ),
+                    _tizenWeb
+                        ? _TvIconButton(
+                            icon: Icons.arrow_back,
+                            focusNode: _backFocus,
+                            onTap: _exit,
+                          )
+                        : IconButton(
+                            onPressed: _exit,
+                            icon: const Icon(Icons.arrow_back,
+                                color: Colors.white),
+                          ),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
@@ -1607,42 +2036,90 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              if (_isTv)
-                IconButton(
-                  iconSize: 34,
-                  onPressed: _prevRef != null ? () => _playEpisode(_prevRef!) : null,
-                  icon: const Icon(Icons.skip_previous),
-                  color: Colors.white,
-                  disabledColor: Colors.white24,
-                  tooltip: 'Previous episode',
-                ),
+              if (_isTv && (!_tizenWeb || _prevRef != null))
+                _tizenWeb
+                    ? _TvIconButton(
+                        icon: Icons.skip_previous,
+                        focusNode: _prevFocus,
+                        onTap: () => _playEpisode(_prevRef!),
+                      )
+                    : IconButton(
+                        iconSize: 34,
+                        onPressed: _prevRef != null
+                            ? () => _playEpisode(_prevRef!)
+                            : null,
+                        icon: const Icon(Icons.skip_previous),
+                        color: Colors.white,
+                        disabledColor: Colors.white24,
+                        tooltip: 'Previous episode',
+                      ),
               const SizedBox(width: 12),
-              _RoundBtn(icon: Icons.replay, label: '15', onTap: () => _seekBy(-15000)),
+              _tizenWeb
+                  ? _TvIconButton(
+                      icon: Icons.replay,
+                      label: '15',
+                      focusNode: _rewFocus,
+                      onTap: () => _seekBy(-15000),
+                    )
+                  : _RoundBtn(
+                      icon: Icons.replay,
+                      label: '15',
+                      onTap: () => _seekBy(-15000),
+                    ),
               const SizedBox(width: 20),
-              IconButton(
-                iconSize: 64,
-                onPressed: _togglePlay,
-                icon: Icon(
-                  _playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                  color: Colors.white,
-                ),
-              ),
+              _tizenWeb
+                  ? _TvIconButton(
+                      icon: _playing
+                          ? Icons.pause_rounded
+                          : Icons.play_arrow_rounded,
+                      iconSize: 64,
+                      focusNode: _playPauseFocus,
+                      autofocus: true,
+                      onTap: _togglePlay,
+                    )
+                  : IconButton(
+                      iconSize: 64,
+                      onPressed: _togglePlay,
+                      icon: Icon(
+                        _playing
+                            ? Icons.pause_rounded
+                            : Icons.play_arrow_rounded,
+                        color: Colors.white,
+                      ),
+                    ),
               const SizedBox(width: 20),
-              _RoundBtn(
-                  icon: Icons.replay,
-                  label: '15',
-                  flip: true,
-                  onTap: () => _seekBy(15000)),
+              _tizenWeb
+                  ? _TvIconButton(
+                      icon: Icons.replay,
+                      label: '15',
+                      flip: true,
+                      focusNode: _ffFocus,
+                      onTap: () => _seekBy(15000),
+                    )
+                  : _RoundBtn(
+                      icon: Icons.replay,
+                      label: '15',
+                      flip: true,
+                      onTap: () => _seekBy(15000),
+                    ),
               const SizedBox(width: 12),
-              if (_isTv)
-                IconButton(
-                  iconSize: 34,
-                  onPressed: _nextRef != null ? () => _playEpisode(_nextRef!) : null,
-                  icon: const Icon(Icons.skip_next),
-                  color: Colors.white,
-                  disabledColor: Colors.white24,
-                  tooltip: 'Next episode',
-                ),
+              if (_isTv && (!_tizenWeb || _nextRef != null))
+                _tizenWeb
+                    ? _TvIconButton(
+                        icon: Icons.skip_next,
+                        focusNode: _nextFocus,
+                        onTap: () => _playEpisode(_nextRef!),
+                      )
+                    : IconButton(
+                        iconSize: 34,
+                        onPressed: _nextRef != null
+                            ? () => _playEpisode(_nextRef!)
+                            : null,
+                        icon: const Icon(Icons.skip_next),
+                        color: Colors.white,
+                        disabledColor: Colors.white24,
+                        tooltip: 'Next episode',
+                      ),
             ],
           ),
           const Spacer(),
@@ -1650,54 +2127,107 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
             child: Row(
               children: [
-                Text(_fmt(_positionMs),
+                Text(_fmt(_scrubbing ? _scrubPreviewMs : _positionMs),
                     style: const TextStyle(color: Colors.white, fontSize: 13)),
                 const SizedBox(width: 10),
-                Expanded(child: _seekBar()),
+                Expanded(
+                  child: _tizenWeb
+                      ? _TvSeekBar(
+                          positionMs:
+                              _scrubbing ? _scrubPreviewMs : _positionMs,
+                          durationMs: _durationMs,
+                          buffered: _bufferedFraction,
+                          focusNode: _seekFocus,
+                          scrubbing: _scrubbing,
+                          onEnterScrub: _enterScrub,
+                          onCommitScrub: _commitScrub,
+                          onCancelScrub: _cancelScrub,
+                          onSeekStep: _scrubStep,
+                          onSeekTo: _seekToMs,
+                        )
+                      : _seekBar(),
+                ),
                 const SizedBox(width: 10),
                 Text(_fmt(_durationMs),
                     style: const TextStyle(color: Colors.white, fontSize: 13)),
-                IconButton(
-                  onPressed: _showSoundMenu,
-                  tooltip: _soundMode == SoundMode.off
-                      ? 'Sound'
-                      : 'Sound: ${_soundMode.label}',
-                  icon: Icon(
-                    Icons.graphic_eq,
-                    color: _soundMode == SoundMode.off
-                        ? Colors.white70
-                        : Colors.white,
-                  ),
-                ),
+                _tizenWeb
+                    ? _TvIconButton(
+                        icon: Icons.graphic_eq,
+                        focusNode: _soundFocus,
+                        color: _soundMode == SoundMode.off
+                            ? Colors.white70
+                            : Colors.white,
+                        onTap: _showSoundMenu,
+                      )
+                    : IconButton(
+                        onPressed: _showSoundMenu,
+                        tooltip: _soundMode == SoundMode.off
+                            ? 'Sound'
+                            : 'Sound: ${_soundMode.label}',
+                        icon: Icon(
+                          Icons.graphic_eq,
+                          color: _soundMode == SoundMode.off
+                              ? Colors.white70
+                              : Colors.white,
+                        ),
+                      ),
                 if (hasQuality) ...[
                   const SizedBox(width: 4),
-                  IconButton(
-                    onPressed: _showQualityMenu,
-                    tooltip: 'Quality',
-                    icon: const Icon(Icons.high_quality_outlined,
-                        color: Colors.white),
-                  ),
+                  _tizenWeb
+                      ? _TvIconButton(
+                          icon: Icons.high_quality_outlined,
+                          focusNode: _qualityFocus,
+                          onTap: _showQualityMenu,
+                        )
+                      : IconButton(
+                          onPressed: _showQualityMenu,
+                          tooltip: 'Quality',
+                          icon: const Icon(Icons.high_quality_outlined,
+                              color: Colors.white),
+                        ),
                 ],
-                IconButton(
-                  onPressed: _showSubtitleMenu,
-                  tooltip: _subIndex < 0
-                      ? 'Subtitles'
-                      : 'Subtitles: ${_subs[_subIndex].label}',
-                  icon: Icon(
-                    _subIndex < 0
-                        ? Icons.closed_caption_off_outlined
-                        : Icons.closed_caption,
-                    color: _subIndex < 0 ? Colors.white70 : Colors.white,
-                  ),
-                ),
-                IconButton(
-                  onPressed: _toggleFullscreen,
-                  tooltip: _fullscreen ? 'Exit full screen' : 'Full screen',
-                  icon: Icon(
-                    _fullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
-                    color: Colors.white,
-                  ),
-                ),
+                _tizenWeb
+                    ? _TvIconButton(
+                        icon: _subIndex < 0
+                            ? Icons.closed_caption_off_outlined
+                            : Icons.closed_caption,
+                        focusNode: _subFocus,
+                        color:
+                            _subIndex < 0 ? Colors.white70 : Colors.white,
+                        onTap: _showSubtitleMenu,
+                      )
+                    : IconButton(
+                        onPressed: _showSubtitleMenu,
+                        tooltip: _subIndex < 0
+                            ? 'Subtitles'
+                            : 'Subtitles: ${_subs[_subIndex].label}',
+                        icon: Icon(
+                          _subIndex < 0
+                              ? Icons.closed_caption_off_outlined
+                              : Icons.closed_caption,
+                          color:
+                              _subIndex < 0 ? Colors.white70 : Colors.white,
+                        ),
+                      ),
+                _tizenWeb
+                    ? _TvIconButton(
+                        icon: _fullscreen
+                            ? Icons.fullscreen_exit
+                            : Icons.fullscreen,
+                        focusNode: _fullFocus,
+                        onTap: _toggleFullscreen,
+                      )
+                    : IconButton(
+                        onPressed: _toggleFullscreen,
+                        tooltip:
+                            _fullscreen ? 'Exit full screen' : 'Full screen',
+                        icon: Icon(
+                          _fullscreen
+                              ? Icons.fullscreen_exit
+                              : Icons.fullscreen,
+                          color: Colors.white,
+                        ),
+                      ),
               ],
             ),
           ),
@@ -1778,11 +2308,18 @@ class _RoundBtn extends StatelessWidget {
 /// Prominent Skip Recap / Skip Intro / Next Episode button; autofocuses so the
 /// keyboard/remote select key triggers it.
 class _SkipButton extends StatefulWidget {
-  const _SkipButton(
-      {required this.label, required this.icon, required this.onTap});
+  const _SkipButton({
+    required this.label,
+    required this.icon,
+    required this.onTap,
+    this.focusNode,
+    this.autofocus = true,
+  });
   final String label;
   final IconData icon;
   final VoidCallback onTap;
+  final FocusNode? focusNode;
+  final bool autofocus;
 
   @override
   State<_SkipButton> createState() => _SkipButtonState();
@@ -1794,6 +2331,8 @@ class _SkipButtonState extends State<_SkipButton> {
   @override
   Widget build(BuildContext context) {
     return FocusableActionDetector(
+      focusNode: widget.focusNode,
+      autofocus: widget.autofocus,
       onFocusChange: (f) => setState(() => _focused = f),
       mouseCursor: SystemMouseCursors.click,
       actions: {
@@ -2043,18 +2582,27 @@ class _MenuRow extends StatefulWidget {
 class _MenuRowState extends State<_MenuRow> {
   bool _focused = false;
 
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    final keys = {
+      LogicalKeyboardKey.enter,
+      LogicalKeyboardKey.numpadEnter,
+      LogicalKeyboardKey.select,
+      LogicalKeyboardKey.space,
+      LogicalKeyboardKey.gameButtonA,
+      LogicalKeyboardKey.mediaPlayPause,
+    };
+    if (!keys.contains(event.logicalKey)) return KeyEventResult.ignored;
+    widget.onTap();
+    return KeyEventResult.handled;
+  }
+
   @override
   Widget build(BuildContext context) {
-    return FocusableActionDetector(
+    return Focus(
       autofocus: widget.autofocus,
       onFocusChange: (f) => setState(() => _focused = f),
-      mouseCursor: SystemMouseCursors.click,
-      actions: {
-        ActivateIntent: CallbackAction<ActivateIntent>(onInvoke: (_) {
-          widget.onTap();
-          return null;
-        }),
-      },
+      onKeyEvent: _onKey,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: widget.onTap,
@@ -2096,6 +2644,265 @@ class _MenuRowState extends State<_MenuRow> {
               if (widget.selected)
                 const Icon(Icons.check, color: AppColors.textPrimary, size: 18),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// White focus ring, same idea as the Android player's remote buttons.
+class _TvIconButton extends StatefulWidget {
+  const _TvIconButton({
+    required this.icon,
+    required this.onTap,
+    this.iconSize = 34,
+    this.focusNode,
+    this.autofocus = false,
+    this.label,
+    this.flip = false,
+    this.color = Colors.white,
+  });
+
+  final IconData icon;
+  final VoidCallback onTap;
+  final double iconSize;
+  final FocusNode? focusNode;
+  final bool autofocus;
+  final String? label;
+  final bool flip;
+  final Color color;
+
+  @override
+  State<_TvIconButton> createState() => _TvIconButtonState();
+}
+
+class _TvIconButtonState extends State<_TvIconButton> {
+  bool _focused = false;
+
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    final keys = {
+      LogicalKeyboardKey.enter,
+      LogicalKeyboardKey.numpadEnter,
+      LogicalKeyboardKey.select,
+      LogicalKeyboardKey.space,
+      LogicalKeyboardKey.gameButtonA,
+      LogicalKeyboardKey.mediaPlayPause,
+    };
+    if (!keys.contains(event.logicalKey)) return KeyEventResult.ignored;
+    widget.onTap();
+    return KeyEventResult.handled;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    Widget icon = Icon(widget.icon, color: widget.color, size: widget.iconSize);
+    if (widget.flip) icon = Transform.flip(flipX: true, child: icon);
+    if (widget.label != null) {
+      icon = Stack(
+        alignment: Alignment.center,
+        children: [
+          icon,
+          Text(
+            widget.label!,
+            style: TextStyle(
+              color: widget.color,
+              fontSize: widget.iconSize * 0.28,
+              fontWeight: FontWeight.bold,
+              height: 1,
+            ),
+          ),
+        ],
+      );
+    }
+    return Focus(
+      focusNode: widget.focusNode,
+      autofocus: widget.autofocus,
+      onFocusChange: (f) => setState(() => _focused = f),
+      onKeyEvent: _onKey,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        child: AnimatedScale(
+          scale: _focused ? 1.12 : 1,
+          duration: const Duration(milliseconds: 120),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 120),
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: _focused ? Colors.white : Colors.transparent,
+                width: 2.5,
+              ),
+            ),
+            child: icon,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Timeline. Arrows move to the neighboring controls until Select starts
+/// scrubbing; then Left/Right move the marker and Select applies it.
+class _TvSeekBar extends StatefulWidget {
+  const _TvSeekBar({
+    required this.positionMs,
+    required this.durationMs,
+    required this.buffered,
+    required this.focusNode,
+    required this.scrubbing,
+    required this.onEnterScrub,
+    required this.onCommitScrub,
+    required this.onCancelScrub,
+    required this.onSeekStep,
+    required this.onSeekTo,
+  });
+
+  final int positionMs;
+  final int durationMs;
+  final double buffered;
+  final FocusNode focusNode;
+  final bool scrubbing;
+  final VoidCallback onEnterScrub;
+  final VoidCallback onCommitScrub;
+  final VoidCallback onCancelScrub;
+  final void Function(int deltaMs) onSeekStep;
+  final void Function(int ms) onSeekTo;
+
+  @override
+  State<_TvSeekBar> createState() => _TvSeekBarState();
+}
+
+class _TvSeekBarState extends State<_TvSeekBar> {
+  bool _focused = false;
+
+  static const _stepMs = 15000;
+
+  static final _selectKeys = {
+    LogicalKeyboardKey.enter,
+    LogicalKeyboardKey.numpadEnter,
+    LogicalKeyboardKey.space,
+    LogicalKeyboardKey.select,
+    LogicalKeyboardKey.gameButtonA,
+  };
+
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    final down = event is KeyDownEvent;
+    final repeat = event is KeyRepeatEvent;
+    if (!down && !repeat) return KeyEventResult.ignored;
+    final key = event.logicalKey;
+    if (widget.scrubbing) {
+      if (key == LogicalKeyboardKey.arrowLeft) {
+        widget.onSeekStep(-_stepMs);
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.arrowRight) {
+        widget.onSeekStep(_stepMs);
+        return KeyEventResult.handled;
+      }
+      if (down &&
+          (_selectKeys.contains(key) ||
+              key == LogicalKeyboardKey.arrowUp ||
+              key == LogicalKeyboardKey.arrowDown)) {
+        widget.onCommitScrub();
+        return KeyEventResult.handled;
+      }
+      if (down &&
+          (key == LogicalKeyboardKey.escape ||
+              key == LogicalKeyboardKey.goBack)) {
+        widget.onCancelScrub();
+        return KeyEventResult.handled;
+      }
+      return KeyEventResult.handled;
+    }
+    if (down && _selectKeys.contains(key)) {
+      widget.onEnterScrub();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dur = widget.durationMs;
+    final frac = dur > 0 ? (widget.positionMs / dur).clamp(0.0, 1.0) : 0.0;
+    final active = _focused || widget.scrubbing;
+    final barHeight = active ? 6.0 : 3.0;
+    final accent = widget.scrubbing ? AppColors.ratingYellow : Colors.white;
+    return Focus(
+      focusNode: widget.focusNode,
+      onKeyEvent: _onKey,
+      onFocusChange: (f) => setState(() => _focused = f),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapUp: (d) {
+          if (dur <= 0) return;
+          final box = context.findRenderObject() as RenderBox?;
+          if (box == null || box.size.width <= 0) return;
+          widget.focusNode.requestFocus();
+          final dx = d.localPosition.dx.clamp(0.0, box.size.width);
+          widget.onSeekTo((dx / box.size.width * dur).round());
+        },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          height: 36,
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: _focused ? Colors.white : Colors.transparent,
+              width: 2,
+            ),
+          ),
+          child: LayoutBuilder(
+            builder: (context, c) {
+              final w = c.maxWidth;
+              return Stack(
+                alignment: Alignment.centerLeft,
+                clipBehavior: Clip.none,
+                children: [
+                  Container(
+                    height: barHeight,
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                  ),
+                  Container(
+                    width: w * widget.buffered.clamp(0.0, 1.0),
+                    height: barHeight,
+                    decoration: BoxDecoration(
+                      color: Colors.white54,
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                  ),
+                  Container(
+                    width: w * frac,
+                    height: barHeight,
+                    decoration: BoxDecoration(
+                      color: accent,
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                  ),
+                  if (active)
+                    Positioned(
+                      left: (w * frac) - 9,
+                      child: Container(
+                        width: 18,
+                        height: 18,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: accent,
+                          border: Border.all(color: Colors.black54, width: 1),
+                        ),
+                      ),
+                    ),
+                ],
+              );
+            },
           ),
         ),
       ),

@@ -91,6 +91,15 @@ SubtitleOption apiSubtitleOption(String url) {
   return SubtitleOption(uri: requestUrl, label: label, language: language);
 }
 
+/// Wyzie tracks first, then each source's own tracks, without repeating a URL.
+List<String> mergeSubtitleUrls(List<String> first, List<String> more) {
+  final seen = <String>{};
+  return [
+    for (final url in [...first, ...more])
+      if (url.isNotEmpty && seen.add(url)) url,
+  ];
+}
+
 /// Builds subtitle options and numbers identical names: the first keeps its
 /// name ("English"), later copies become "English 2", "English 3", and so on.
 List<SubtitleOption> apiSubtitleOptions(List<String> urls) {

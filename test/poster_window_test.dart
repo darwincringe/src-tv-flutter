@@ -80,27 +80,19 @@ void main() {
     expect(back, 0);
   });
 
-  testWidgets('see more hides the first five and the first card brings them back',
+  testWidgets('see more appends titles and keeps the ones already shown',
       (tester) async {
-    // Two columns and three rows: six cells, one of them the See more card.
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: ListView(
-            children: [
-              Align(
-                alignment: Alignment.centerLeft,
-                child: SizedBox(
-                  width: 200,
-                  child: PagedPosterGrid(
-                    itemCount: 20,
-                    posterPath: (_) => null,
-                    itemBuilder: (context, index, lead, focusNode) =>
-                        Text('title-$index', key: ValueKey('title-$index')),
-                  ),
-                ),
-              ),
-            ],
+          body: SizedBox(
+            width: 1100,
+            child: PagedPosterGrid(
+              itemCount: 20,
+              rows: 1,
+              posterPath: _emptyPoster,
+              itemBuilder: _title,
+            ),
           ),
         ),
       ),
@@ -108,31 +100,23 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('title-0'), findsOneWidget);
-    expect(find.text('title-4'), findsOneWidget);
-    expect(find.text('title-5'), findsNothing);
-    expect(find.text('See more'), findsOneWidget);
-
-    await tester.tap(find.text('See more'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 120));
-    // Posters that are leaving are still in the tree while they slide out.
-    expect(find.text('title-0'), findsOneWidget);
-
-    await tester.pumpAndSettle();
-
-    expect(find.text('title-0'), findsNothing);
-    expect(find.text('title-4'), findsNothing);
-    expect(find.text('title-5'), findsOneWidget);
     expect(find.text('title-8'), findsOneWidget);
     expect(find.text('title-9'), findsNothing);
-    expect(find.text('See more'), findsNWidgets(2));
+    expect(find.text('See more'), findsOneWidget);
 
-    await tester.tap(find.text('See more').first);
+    await tester.scrollUntilVisible(
+      find.text('See more'),
+      400,
+      scrollable: find.byType(Scrollable),
+    );
+    await tester.tap(find.text('See more'));
     await tester.pumpAndSettle();
 
     expect(find.text('title-0'), findsOneWidget);
-    expect(find.text('title-4'), findsOneWidget);
-    expect(find.text('title-5'), findsNothing);
+    expect(find.text('title-8'), findsOneWidget);
+    expect(find.text('title-9'), findsOneWidget);
+    expect(find.text('title-13'), findsOneWidget);
+    expect(find.text('title-14'), findsNothing);
     expect(find.text('See more'), findsOneWidget);
   });
 
@@ -196,7 +180,8 @@ void main() {
     expect(after, greaterThan(before + 100));
   });
 
-  testWidgets('a poster that stays slides into its new cell', (tester) async {
+  testWidgets('a poster that stays does not move when more are appended',
+      (tester) async {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     // One row of eight cells. Titles 5 and 6 are in both windows.
@@ -217,20 +202,17 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    await tester.scrollUntilVisible(
+      find.text('See more'),
+      400,
+      scrollable: find.byType(Scrollable),
+    );
     final before = tester.getTopLeft(find.text('title-5'));
     await tester.tap(find.text('See more'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 160));
-
-    final during = tester.getTopLeft(find.text('title-5'));
-    expect(during.dx, lessThan(before.dx));
-    expect(during.dx, greaterThan(0));
-    expect(find.text('title-0'), findsOneWidget);
-
     await tester.pumpAndSettle();
-    final after = tester.getTopLeft(find.text('title-5'));
-    expect(after.dx, lessThan(before.dx));
-    expect(after.dx, greaterThan(0));
+
+    expect(find.text('title-0'), findsOneWidget);
+    expect(tester.getTopLeft(find.text('title-5')), before);
   });
 }
 

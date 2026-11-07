@@ -16,8 +16,7 @@ class StreamMirror {
   });
 }
 
-/// Response from the self-hosted extract backend
-/// `GET /extract?tmdb_id=&type=&season=&episode=&source=`.
+/// Response from `GET /extract/vaplayer` or `GET /wyzie`.
 @JsonSerializable(fieldRename: FieldRename.snake)
 class ExtractResponse {
   final bool success;
@@ -26,8 +25,12 @@ class ExtractResponse {
   final List<String> subtitles;
   final String? error;
 
-  /// Every mirror the backend can play. Empty on older responses that only
-  /// send [hlsUrl].
+  /// Provider and quality of the top-level [hlsUrl]. Not part of the generated
+  /// JSON helper; the client fills them in while parsing.
+  final String? source;
+  final String? quality;
+
+  /// Mirrors from this one response. Empty when the body only sends [hlsUrl].
   final List<StreamMirror> mirrors;
 
   const ExtractResponse({
@@ -35,6 +38,8 @@ class ExtractResponse {
     this.hlsUrl,
     this.subtitles = const [],
     this.error,
+    this.source,
+    this.quality,
     this.mirrors = const [],
   });
 

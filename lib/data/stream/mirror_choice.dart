@@ -1,136 +1,128 @@
 import 'extract_response.dart';
 
-/// Source used when the user's saved mirror is missing from this title.
+/// Source used when this title has no saved mirror.
 const String fallbackMirrorSource = 'vaplayer';
 
-/// The URL to play and which row in [ExtractResponse.mirrors] it is.
-/// [index] is -1 when the URL is the top-level `hls_url` and not one of the
-/// listed mirrors.
-class MirrorPick {
-  final String url;
-  final int index;
+/// Providers requested one at a time. Nashville is not asked for on its own:
+/// the server uses it only when a Vaplayer request comes back empty.
+const List<String> playbackSources = [
+  'vaplayer',
+  'movy',
+  'flixhq',
+  'catflix',
+  'ophim',
+];
 
-  const MirrorPick({required this.url, required this.index});
+/// Saved source first. With nothing saved, Vaplayer is first. The rest follow
+/// in [playbackSources] order, skipping the one already in front.
+List<String> playbackSourceQueue(String? preferred) {
+  final saved = preferred?.trim().toLowerCase() ?? '';
+  if (saved.isEmpty) return List<String>.from(playbackSources);
+  final rest = playbackSources.where((source) => source != saved);
+  return [saved, ...rest];
 }
 
-/// Picks what to play.
-///
-/// A saved [preferred] source wins when that mirror is in the list. If it is
-/// not, playback falls back to [fallbackMirrorSource]. With no preference, the
-/// response's own `hls_url` is used.
-MirrorPick? pickPlayback(ExtractResponse res, String? preferred) {
-  final mirrors = res.mirrors;
-  final wanted = preferred?.trim().toLowerCase() ?? '';
+/// Mirrors that belong to the provider we just asked for. A Vaplayer request
+/// may also come back as Nashville when Vaplayer itself had nothing.
+List<StreamMirror> mirrorsForPinned(ExtractResponse res, String pinned) {
+  final want = pinned.trim().toLowerCase();
+  bool keep(String source) {
+    final name = source.trim().toLowerCase();
+    if (name == want) return true;
+    return want == fallbackMirrorSource && name == 'nashville';
+  }
 
-  StreamMirror? chosen;
-  if (wanted.isNotEmpty) {
-    chosen = _matchSource(mirrors, wanted) ??
-        _matchSource(mirrors, fallbackMirrorSource);
+  final out = <StreamMirror>[];
+  final seen = <String>{};
+  for (final mirror in res.mirrors) {
+    if (mirror.hlsUrl.isEmpty || !keep(mirror.source)) continue;
+    if (seen.add(mirror.hlsUrl)) out.add(mirror);
   }
-  chosen ??= _matchUrl(mirrors, res.hlsUrl);
-  if (chosen == null) {
-    final fallbackUrl = res.hlsUrl;
-    if (fallbackUrl != null && fallbackUrl.isNotEmpty) {
-      return MirrorPick(url: fallbackUrl, index: -1);
-    }
-    chosen = _matchSource(mirrors, fallbackMirrorSource) ??
-        (mirrors.isEmpty ? null : mirrors.first);
+  final top = res.hlsUrl;
+  final topSource = res.source?.trim() ?? '';
+  if (top != null &&
+      top.isNotEmpty &&
+      !seen.contains(top) &&
+      (topSource.isEmpty || keep(topSource))) {
+    out.insert(
+      0,
+      StreamMirror(
+        hlsUrl: top,
+        source: topSource.isEmpty ? pinned : topSource,
+        quality: res.quality?.trim() ?? '',
+      ),
+    );
   }
-  if (chosen == null || chosen.hlsUrl.isEmpty) return null;
-  return MirrorPick(url: chosen.hlsUrl, index: mirrors.indexOf(chosen));
+  return out;
 }
 
-/// True when [preferred] was requested but the pick is not that source and is
-/// not already the Vaplayer fallback — the caller should ask the API again
-/// with `source=vaplayer`.
-bool needsVaplayerRetry(ExtractResponse res, String? preferred, MirrorPick? pick) {
-  final wanted = preferred?.trim().toLowerCase() ?? '';
-  if (wanted.isEmpty || wanted == fallbackMirrorSource) return pick == null;
-  if (pick == null || pick.index < 0 || pick.index >= res.mirrors.length) {
-    return true;
-  }
-  final playing = res.mirrors[pick.index].source.toLowerCase();
-  return playing != wanted && playing != fallbackMirrorSource;
-}
+/// One step of a playback load. [playUrl] is set only on the first provider
+/// that can actually start.
+class PlaybackSlice {
+  final List<StreamMirror> mirrors;
+  final List<String> subtitles;
+  final String? playUrl;
+  final int playIndex;
 
-/// Loads a stream for [preferred], keeping every mirror available to the picker.
-///
-/// The saved source is sent as `source` so the backend can select it. If that
-/// comes back with only one row, a second request without `source` fills in
-/// the rest of the list. When the saved source is not in the list, playback
-/// falls back to Vaplayer.
-Future<ResolvedPlayback?> resolvePlayback({
-  required String? preferred,
-  required Future<ExtractResponse> Function(String? source) extract,
-}) async {
-  final saved = preferred?.trim() ?? '';
-  var res = await extract(saved.isEmpty ? null : saved);
-  var pick = pickPlayback(res, preferred);
-  if (saved.isNotEmpty && res.mirrors.length <= 1) {
-    try {
-      final full = await extract(null);
-      if (full.mirrors.length > res.mirrors.length) {
-        final keptUrl = pick?.url;
-        res = full;
-        pick = pickPlayback(full, preferred) ??
-            (keptUrl == null ? null : MirrorPick(url: keptUrl, index: -1));
-      }
-    } catch (_) {}
-  }
-  if (needsVaplayerRetry(res, preferred, pick)) {
-    try {
-      final again = await extract(fallbackMirrorSource);
-      final retry = pickPlayback(again, fallbackMirrorSource);
-      if (retry != null) {
-        final onFullList = _indexOfSource(res.mirrors, fallbackMirrorSource);
-        if (onFullList >= 0 && res.mirrors.length >= again.mirrors.length) {
-          pick = MirrorPick(url: res.mirrors[onFullList].hlsUrl, index: onFullList);
-        } else {
-          res = again;
-          pick = retry;
-        }
-      }
-    } catch (_) {}
-  }
-  if (pick == null) return null;
-  return ResolvedPlayback(response: res, url: pick.url, index: pick.index);
-}
-
-int _indexOfSource(List<StreamMirror> mirrors, String source) {
-  for (var i = 0; i < mirrors.length; i++) {
-    if (mirrors[i].source.toLowerCase() == source &&
-        mirrors[i].hlsUrl.isNotEmpty) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-class ResolvedPlayback {
-  final ExtractResponse response;
-  final String url;
-  final int index;
-
-  const ResolvedPlayback({
-    required this.response,
-    required this.url,
-    required this.index,
+  const PlaybackSlice({
+    required this.mirrors,
+    required this.subtitles,
+    this.playUrl,
+    this.playIndex = -1,
   });
 }
 
-StreamMirror? _matchSource(List<StreamMirror> mirrors, String source) {
-  for (final m in mirrors) {
-    if (m.hlsUrl.isNotEmpty && m.source.toLowerCase() == source) return m;
+/// Asks for each provider on its own. The first slice that has [PlaybackSlice.playUrl]
+/// is the one to start. Later slices only add mirrors and that provider's
+/// subtitles.
+Stream<PlaybackSlice> playbackSlices({
+  required String? preferred,
+  required Future<ExtractResponse> Function(String source) extract,
+}) async* {
+  final mirrors = <StreamMirror>[];
+  final subtitles = <String>[];
+  final seenUrls = <String>{};
+  final seenSubs = <String>{};
+  var playing = false;
+  for (final source in playbackSourceQueue(preferred)) {
+    ExtractResponse res;
+    try {
+      res = await extract(source);
+    } catch (_) {
+      continue;
+    }
+    final before = mirrors.length;
+    final subsBefore = subtitles.length;
+    for (final mirror in mirrorsForPinned(res, source)) {
+      if (seenUrls.add(mirror.hlsUrl)) mirrors.add(mirror);
+    }
+    for (final line in res.subtitles) {
+      if (line.isEmpty || !seenSubs.add(line)) continue;
+      subtitles.add(line);
+    }
+    String? playUrl;
+    var playIndex = -1;
+    if (!playing && mirrors.length > before) {
+      playing = true;
+      playIndex = before;
+      playUrl = mirrors[before].hlsUrl;
+      final top = res.hlsUrl;
+      if (top != null && top.isNotEmpty) {
+        final at = mirrors.indexWhere((mirror) => mirror.hlsUrl == top);
+        if (at >= 0) {
+          playIndex = at;
+          playUrl = mirrors[at].hlsUrl;
+        }
+      }
+    }
+    if (mirrors.length == before && subtitles.length == subsBefore) continue;
+    yield PlaybackSlice(
+      mirrors: List<StreamMirror>.unmodifiable(mirrors),
+      subtitles: List<String>.unmodifiable(subtitles),
+      playUrl: playUrl,
+      playIndex: playIndex,
+    );
   }
-  return null;
-}
-
-StreamMirror? _matchUrl(List<StreamMirror> mirrors, String? url) {
-  if (url == null || url.isEmpty) return null;
-  for (final m in mirrors) {
-    if (m.hlsUrl == url) return m;
-  }
-  return null;
 }
 
 /// Button text: the provider name plus its quality, e.g. "Catflix 1080p".

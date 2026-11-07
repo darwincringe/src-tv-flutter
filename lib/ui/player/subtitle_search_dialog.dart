@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pointer_interceptor/pointer_interceptor.dart';
@@ -22,8 +23,26 @@ class SearchedSubtitle {
   });
 }
 
+class _RememberedSubtitleSearch {
+  final String query;
+  final List<OpenSubtitleHit> hits;
+
+  const _RememberedSubtitleSearch({required this.query, required this.hits});
+}
+
+/// Last results for a title, kept after the dialog closes or a track is picked
+/// so opening search again does not spend another lookup.
+final Map<String, _RememberedSubtitleSearch> _subtitleSearches = {};
+
+String _subtitleSearchKey(String type, int tmdbId, int? season, int? episode) =>
+    '$type-$tmdbId-s${season ?? 0}e${episode ?? 0}';
+
+@visibleForTesting
+void clearSubtitleSearchMemory() => _subtitleSearches.clear();
+
 /// Keyword search. The field starts as `Title s01e01`. Down leaves the field,
 /// and the Search button is focused so a remote can run it with one OK.
+/// Reopening the dialog for the same title shows the last results.
 Future<SearchedSubtitle?> showSubtitleSearchDialog(
   BuildContext context, {
   required String initialQuery,
@@ -73,14 +92,31 @@ class _SubtitleSearchDialog extends StatefulWidget {
 }
 
 class _SubtitleSearchDialogState extends State<_SubtitleSearchDialog> {
-  late final TextEditingController _query =
-      TextEditingController(text: widget.initialQuery);
+  late final TextEditingController _query;
   final FocusNode _searchFocus = FocusNode();
   List<OpenSubtitleHit> _hits = const [];
   bool _busy = false;
   String? _downloadingId;
   String? _error;
   bool _searched = false;
+
+  String get _key => _subtitleSearchKey(
+        widget.type,
+        widget.tmdbId,
+        widget.season,
+        widget.episode,
+      );
+
+  @override
+  void initState() {
+    super.initState();
+    final saved = _subtitleSearches[_key];
+    _query = TextEditingController(text: saved?.query ?? widget.initialQuery);
+    if (saved != null) {
+      _hits = saved.hits;
+      _searched = true;
+    }
+  }
 
   @override
   void dispose() {
@@ -89,9 +125,14 @@ class _SubtitleSearchDialogState extends State<_SubtitleSearchDialog> {
     super.dispose();
   }
 
+  void _remember(String query, List<OpenSubtitleHit> hits) {
+    _subtitleSearches[_key] = _RememberedSubtitleSearch(query: query, hits: hits);
+  }
+
   Future<void> _search() async {
+    final queryText = _query.text;
     final parsed = parseSubtitleSearch(
-      _query.text,
+      queryText,
       season: widget.season,
       episode: widget.episode,
     );
@@ -102,7 +143,6 @@ class _SubtitleSearchDialogState extends State<_SubtitleSearchDialog> {
     setState(() {
       _busy = true;
       _error = null;
-      _hits = const [];
     });
     final sameShow = widget.title.trim().isNotEmpty &&
         parsed.q.toLowerCase() == widget.title.trim().toLowerCase();
@@ -114,6 +154,7 @@ class _SubtitleSearchDialogState extends State<_SubtitleSearchDialog> {
         tmdbId: sameShow ? widget.tmdbId : null,
         type: sameShow ? widget.type : null,
       );
+      _remember(queryText, hits);
       if (!mounted) return;
       setState(() {
         _busy = false;
