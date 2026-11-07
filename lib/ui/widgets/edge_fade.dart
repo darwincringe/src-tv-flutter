@@ -1,8 +1,12 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
-/// Fades the leading and trailing edges of a scroll view instead of cutting
-/// the card that is halfway out of view. An edge that has nothing hidden
-/// stays solid.
+import '../../core/theme.dart';
+
+/// Fades the leading and trailing edges of a scroll view so a poster that is
+/// halfway out of view dissolves into the page instead of being sliced off.
+/// An edge that has nothing hidden stays solid.
 class EdgeFade extends StatefulWidget {
   const EdgeFade({
     super.key,
@@ -61,28 +65,74 @@ class _EdgeFadeState extends State<EdgeFade> {
     final back = _canBack;
     final forward = _canForward;
     if (!back && !forward) return widget.child;
-    return ShaderMask(
-      blendMode: BlendMode.dstIn,
-      shaderCallback: (rect) {
-        final span = widget.axis == Axis.horizontal ? rect.width : rect.height;
-        final fade = span <= 0 ? 0.0 : (36 / span).clamp(0.0, 0.18);
-        return LinearGradient(
-          begin: widget.axis == Axis.horizontal
-              ? Alignment.centerLeft
-              : Alignment.topCenter,
-          end: widget.axis == Axis.horizontal
-              ? Alignment.centerRight
-              : Alignment.bottomCenter,
-          colors: [
-            back ? Colors.transparent : Colors.black,
-            Colors.black,
-            Colors.black,
-            forward ? Colors.transparent : Colors.black,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final horizontal = widget.axis == Axis.horizontal;
+        final span =
+            horizontal ? constraints.maxWidth : constraints.maxHeight;
+        final fade = span.isFinite
+            ? math.min(160.0, span * 0.22).clamp(72.0, 160.0)
+            : 120.0;
+        return Stack(
+          children: [
+            widget.child,
+            if (back)
+              Positioned(
+                left: horizontal ? 0 : null,
+                top: 0,
+                right: horizontal ? null : 0,
+                bottom: horizontal ? 0 : null,
+                width: horizontal ? fade : null,
+                height: horizontal ? null : fade,
+                child: _EdgeScrim(axis: widget.axis, leading: true),
+              ),
+            if (forward)
+              Positioned(
+                left: horizontal ? null : 0,
+                top: horizontal ? 0 : null,
+                right: 0,
+                bottom: 0,
+                width: horizontal ? fade : null,
+                height: horizontal ? null : fade,
+                child: _EdgeScrim(axis: widget.axis, leading: false),
+              ),
           ],
-          stops: [0, fade, 1 - fade, 1],
-        ).createShader(rect);
+        );
       },
-      child: widget.child,
+    );
+  }
+}
+
+class _EdgeScrim extends StatelessWidget {
+  const _EdgeScrim({required this.axis, required this.leading});
+
+  final Axis axis;
+  final bool leading;
+
+  @override
+  Widget build(BuildContext context) {
+    final horizontal = axis == Axis.horizontal;
+    final begin = horizontal
+        ? (leading ? Alignment.centerLeft : Alignment.centerRight)
+        : (leading ? Alignment.topCenter : Alignment.bottomCenter);
+    final end = horizontal
+        ? (leading ? Alignment.centerRight : Alignment.centerLeft)
+        : (leading ? Alignment.bottomCenter : Alignment.topCenter);
+    return IgnorePointer(
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: begin,
+            end: end,
+            colors: const [
+              AppColors.charcoal,
+              Color(0xE6161616),
+              Color(0x00161616),
+            ],
+            stops: const [0.0, 0.38, 1.0],
+          ),
+        ),
+      ),
     );
   }
 }
