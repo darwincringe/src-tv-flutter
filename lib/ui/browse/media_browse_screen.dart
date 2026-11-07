@@ -12,6 +12,7 @@ import '../../data/store/watch_progress.dart';
 import '../widgets/branded_loader.dart';
 import '../widgets/category_row.dart';
 import '../widgets/continue_watching_row.dart';
+import '../widgets/edge_fade.dart';
 import '../widgets/hero_backdrop.dart';
 import '../widgets/state_views.dart';
 
@@ -53,6 +54,7 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
   int _personalGen = 0;
 
   final FocusNode _firstCardFocus = FocusNode();
+  final ScrollController _rowsScroll = ScrollController();
 
   @override
   void initState() {
@@ -82,6 +84,7 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
     WatchProgressStore.revision.removeListener(_onAccountData);
     _heroDebounce?.cancel();
     _firstCardFocus.dispose();
+    _rowsScroll.dispose();
     super.dispose();
   }
 
@@ -291,11 +294,15 @@ class _MediaBrowseScreenState extends ConsumerState<MediaBrowseScreen>
       if (assignFocus) focusAssigned = true;
     }
 
-    return ListView.separated(
-      padding: const EdgeInsets.only(top: 4, bottom: 20),
-      itemCount: sections.length,
-      separatorBuilder: (_, _) => const SizedBox(height: 8),
-      itemBuilder: (context, index) => sections[index],
+    return TopEdgeFade(
+      controller: _rowsScroll,
+      child: ListView.separated(
+        controller: _rowsScroll,
+        padding: const EdgeInsets.only(top: 4, bottom: 20),
+        itemCount: sections.length,
+        separatorBuilder: (_, _) => const SizedBox(height: 8),
+        itemBuilder: (context, index) => sections[index],
+      ),
     );
   }
 

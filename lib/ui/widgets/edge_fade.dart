@@ -103,6 +103,79 @@ class _EdgeFadeState extends State<EdgeFade> {
   }
 }
 
+/// Fades the top of a vertical list once it has scrolled, so a row leaving
+/// the page dissolves instead of being cut off against the hero.
+class TopEdgeFade extends StatefulWidget {
+  const TopEdgeFade({
+    super.key,
+    required this.controller,
+    required this.child,
+  });
+
+  final ScrollController controller;
+  final Widget child;
+
+  @override
+  State<TopEdgeFade> createState() => _TopEdgeFadeState();
+}
+
+class _TopEdgeFadeState extends State<TopEdgeFade> {
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_changed);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _changed());
+  }
+
+  @override
+  void didUpdateWidget(TopEdgeFade oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller == widget.controller) return;
+    oldWidget.controller.removeListener(_changed);
+    widget.controller.addListener(_changed);
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_changed);
+    super.dispose();
+  }
+
+  void _changed() {
+    if (mounted) setState(() {});
+  }
+
+  bool get _scrolled {
+    if (!widget.controller.hasClients) return false;
+    return widget.controller.position.pixels > 1;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_scrolled) return widget.child;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final span = constraints.maxHeight;
+        final fade = span.isFinite
+            ? math.min(170.0, span * 0.28).clamp(96.0, 170.0)
+            : 140.0;
+        return Stack(
+          children: [
+            widget.child,
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: fade,
+              child: const _EdgeScrim(axis: Axis.vertical, leading: true),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
 class _EdgeScrim extends StatelessWidget {
   const _EdgeScrim({required this.axis, required this.leading});
 
