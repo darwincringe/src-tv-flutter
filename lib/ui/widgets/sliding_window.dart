@@ -152,6 +152,7 @@ class _SlidingWindowState extends State<SlidingWindow> {
   final FocusNode _beginFocus = FocusNode(debugLabel: 'window-see-more-begin');
   final FocusNode _endFocus = FocusNode(debugLabel: 'window-see-more-end');
   final FocusNode _leadFocus = FocusNode(debugLabel: 'window-lead');
+  final Map<int, FocusNode> _itemFocus = {};
 
   @override
   void dispose() {
@@ -159,8 +160,16 @@ class _SlidingWindowState extends State<SlidingWindow> {
     _beginFocus.dispose();
     _endFocus.dispose();
     _leadFocus.dispose();
+    for (final node in _itemFocus.values) {
+      node.dispose();
+    }
     super.dispose();
   }
+
+  FocusNode _nodeFor(int index) => _itemFocus.putIfAbsent(
+        index,
+        () => FocusNode(debugLabel: 'window-$index'),
+      );
 
   FocusNode get _leadNode => widget.firstItemFocusNode ?? _leadFocus;
 
@@ -186,8 +195,14 @@ class _SlidingWindowState extends State<SlidingWindow> {
   void _growPortrait(int total) {
     final shown = _portraitShown ?? math.min(total, widget.initialTitles);
     if (shown >= total) return;
-    _endFocus.unfocus();
+    final revealed = shown;
+    _nodeFor(revealed);
     setState(() => _portraitShown = math.min(total, shown + widget.step));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final node = _itemFocus[revealed];
+      if (node != null && node.canRequestFocus) node.requestFocus();
+    });
   }
 
   /// A vertical list that grows downward. See more stays under the last item.
@@ -213,7 +228,7 @@ class _SlidingWindowState extends State<SlidingWindow> {
                 context,
                 i,
                 i == 0,
-                i == 0 ? _leadNode : null,
+                _itemFocus[i] ?? (i == 0 ? _leadNode : null),
               ),
             ),
           ),
@@ -245,6 +260,7 @@ class _SlidingWindowState extends State<SlidingWindow> {
         : math.max(120.0, (width - widget.gap * (cols - 1)) / cols);
     final cardHeight = cardWidth / widget.cardAspect + widget.extraHeight;
     final stride = cardWidth + widget.gap;
+    const focusPad = 12.0;
     final shown = math.min(
       total,
       _portraitShown ?? math.min(total, widget.initialTitles),
@@ -266,8 +282,8 @@ class _SlidingWindowState extends State<SlidingWindow> {
       final col = slot ~/ rows;
       final row = slot % rows;
       return Rect.fromLTWH(
-        col * stride,
-        row * (cardHeight + widget.gap),
+        focusPad + col * stride,
+        focusPad + row * (cardHeight + widget.gap),
         cardWidth,
         cardHeight,
       );
@@ -281,8 +297,10 @@ class _SlidingWindowState extends State<SlidingWindow> {
           child: _childForId(ids[i], page, total, shown + 1),
         ),
     ];
-    final contentWidth = placed.map((slot) => slot.rect.right).reduce(math.max);
-    final height = placed.map((slot) => slot.rect.bottom).reduce(math.max);
+    final contentWidth =
+        placed.map((slot) => slot.rect.right).reduce(math.max) + focusPad;
+    final height =
+        placed.map((slot) => slot.rect.bottom).reduce(math.max) + focusPad;
     return SizedBox(
       width: width,
       height: height,
@@ -329,6 +347,7 @@ class _SlidingWindowState extends State<SlidingWindow> {
     }
     final index = int.parse(id.substring(1));
     final lead = index == 0 && page.start == 0;
-    return widget.itemBuilder(context, index, lead, lead ? _leadNode : null);
+    final node = _itemFocus[index] ?? (lead ? _leadNode : null);
+    return widget.itemBuilder(context, index, lead, node);
   }
 }

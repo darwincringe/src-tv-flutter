@@ -55,19 +55,34 @@ class EpisodeWindow extends StatefulWidget {
 class _EpisodeWindowState extends State<EpisodeWindow> {
   int? _shown;
   final FocusNode _endFocus = FocusNode(debugLabel: 'episode-see-more-end');
+  final Map<int, FocusNode> _itemFocus = {};
 
   @override
   void dispose() {
     _endFocus.dispose();
+    for (final node in _itemFocus.values) {
+      node.dispose();
+    }
     super.dispose();
   }
+
+  FocusNode _nodeFor(int index) => _itemFocus.putIfAbsent(
+        index,
+        () => FocusNode(debugLabel: 'episode-$index'),
+      );
 
   void _grow() {
     final total = widget.itemCount;
     final shown = _shown ?? math.min(total, widget.limit);
     if (shown >= total) return;
-    _endFocus.unfocus();
+    final revealed = shown;
+    _nodeFor(revealed);
     setState(() => _shown = math.min(total, shown + widget.step));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final node = _itemFocus[revealed];
+      if (node != null && node.canRequestFocus) node.requestFocus();
+    });
   }
 
   @override
@@ -78,13 +93,14 @@ class _EpisodeWindowState extends State<EpisodeWindow> {
     final children = <Widget>[];
     for (var i = 0; i < shown; i++) {
       final lead = i == 0;
+      final node = _itemFocus[i] ?? (lead ? widget.firstItemFocusNode : null);
       children.add(Padding(
         padding: const EdgeInsets.only(bottom: 12),
         child: widget.itemBuilder(
           context,
           i,
           lead,
-          lead ? widget.firstItemFocusNode : null,
+          node,
         ),
       ));
     }

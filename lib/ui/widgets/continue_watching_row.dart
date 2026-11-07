@@ -159,19 +159,27 @@ class _PagedPosterGridState extends State<PagedPosterGrid> {
   final FocusNode _beginFocus = FocusNode(debugLabel: 'see-more-begin');
   final FocusNode _endFocus = FocusNode(debugLabel: 'see-more-end');
   final FocusNode _leadFocus = FocusNode(debugLabel: 'paged-lead');
+  final Map<int, FocusNode> _itemFocus = {};
   int? _visibleStart;
   int? _visibleShown;
   bool _visibleQueued = false;
 
-  @override
   @override
   void dispose() {
     _scroller.dispose();
     _beginFocus.dispose();
     _endFocus.dispose();
     _leadFocus.dispose();
+    for (final node in _itemFocus.values) {
+      node.dispose();
+    }
     super.dispose();
   }
+
+  FocusNode _nodeFor(int index) => _itemFocus.putIfAbsent(
+        index,
+        () => FocusNode(debugLabel: 'poster-$index'),
+      );
 
   FocusNode get _leadNode => widget.firstItemFocusNode ?? _leadFocus;
 
@@ -200,9 +208,17 @@ class _PagedPosterGridState extends State<PagedPosterGrid> {
     if (shown >= total) return;
     final next = math.min(total, shown + widget.step);
     if (next == shown) return;
-    _endFocus.unfocus();
+    // The See more card is the next title. Keep the remote on that title
+    // once it becomes a real poster, instead of dropping back to the first.
+    final revealed = shown;
+    _nodeFor(revealed);
     setState(() => _portraitShown = next);
     _noteRange(0, next);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final node = _itemFocus[revealed];
+      if (node != null && node.canRequestFocus) node.requestFocus();
+    });
   }
 
   int _firstPortraitShown(int total, int capacity) {
@@ -239,6 +255,9 @@ class _PagedPosterGridState extends State<PagedPosterGrid> {
 
     const cardWidth = _extent;
     final cardHeight = cardWidth * 3 / 2;
+    // Room for the focus ring, which is drawn around the poster. Without it
+    // the row clips the top and bottom of the selected card.
+    const focusPad = 12.0;
     final rows = math.max(1, widget.rows);
     final page = PosterWindow(
       start: 0,
@@ -254,8 +273,8 @@ class _PagedPosterGridState extends State<PagedPosterGrid> {
       final col = slot ~/ rows;
       final row = slot % rows;
       return Rect.fromLTWH(
-        col * (cardWidth + _gap),
-        row * (cardHeight + _rowGap),
+        focusPad + col * (cardWidth + _gap),
+        focusPad + row * (cardHeight + _rowGap),
         cardWidth,
         cardHeight,
       );
@@ -269,8 +288,10 @@ class _PagedPosterGridState extends State<PagedPosterGrid> {
           child: _childForId(ids[i], page, total, capacity),
         ),
     ];
-    final contentWidth = placed.map((slot) => slot.rect.right).reduce(math.max);
-    final height = placed.map((slot) => slot.rect.bottom).reduce(math.max);
+    final contentWidth =
+        placed.map((slot) => slot.rect.right).reduce(math.max) + focusPad;
+    final height =
+        placed.map((slot) => slot.rect.bottom).reduce(math.max) + focusPad;
     return SizedBox(
       width: width,
       height: height,
@@ -309,12 +330,8 @@ class _PagedPosterGridState extends State<PagedPosterGrid> {
     }
     final index = int.parse(id.substring(1));
     final lead = index == 0 && page.start == 0;
-    return widget.itemBuilder(
-      context,
-      index,
-      lead,
-      lead ? _leadNode : null,
-    );
+    final node = _itemFocus[index] ?? (lead ? _leadNode : null);
+    return widget.itemBuilder(context, index, lead, node);
   }
 
   Widget _seeMore(int index, int total, int capacity, {required bool back}) {
@@ -351,8 +368,8 @@ class SeeMorePoster extends StatelessWidget {
     return FocusableCard(
       focusNode: focusNode,
       onTap: onTap,
-      focusedScale: 1.08,
-      borderWidth: 3,
+      focusedScale: 1.04,
+      borderWidth: 2.5,
       ensureVisibleOnFocus: ensureVisible,
       borderRadius: BorderRadius.circular(10),
       child: Stack(
@@ -519,8 +536,8 @@ class _ContinueWatchingCard extends StatelessWidget {
       autofocus: autofocus,
       focusNode: focusNode,
       onFocusChange: onFocusChange,
-      focusedScale: 1.08,
-      borderWidth: 3,
+      focusedScale: 1.04,
+      borderWidth: 2.5,
       ensureVisibleOnFocus: true,
       borderRadius: BorderRadius.circular(10),
       child: AspectRatio(

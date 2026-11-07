@@ -51,7 +51,8 @@ class PosterCard extends StatelessWidget {
         focusNode: focusNode,
         onFocusChange: onFocusChange,
         ensureVisibleOnFocus: ensureVisibleOnFocus,
-        focusedScale: 1.08,
+        focusedScale: 1.04,
+        borderWidth: 2.5,
         borderRadius: BorderRadius.circular(10),
         child: AspectRatio(
           aspectRatio: 2 / 3,

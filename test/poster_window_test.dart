@@ -118,6 +118,8 @@ void main() {
     expect(find.text('title-13'), findsOneWidget);
     expect(find.text('title-14'), findsNothing);
     expect(find.text('See more'), findsOneWidget);
+    expect(Focus.of(tester.element(find.text('title-9'))).hasFocus, isTrue);
+    expect(Focus.of(tester.element(find.text('title-0'))).hasFocus, isFalse);
   });
 
   testWidgets('portrait scrolls the row and keeps see more at the end',
@@ -219,5 +221,8 @@ void main() {
 String? _emptyPoster(int index) => null;
 
 Widget _title(BuildContext context, int index, bool lead, FocusNode? focusNode) {
-  return Text('title-$index', key: ValueKey('title-$index'));
+  return Focus(
+    focusNode: focusNode,
+    child: Text('title-$index', key: ValueKey('title-$index')),
+  );
 }
