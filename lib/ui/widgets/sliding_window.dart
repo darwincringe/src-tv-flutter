@@ -2,9 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
-import '../../core/focus.dart';
 import 'continue_watching_row.dart';
-import 'edge_fade.dart';
 
 class _Slot {
   const _Slot({required this.id, required this.rect, required this.child});
@@ -305,11 +303,7 @@ class _SlidingWindowState extends State<SlidingWindow> {
     return SizedBox(
       width: width,
       height: height,
-      child: FocusTraversalGroup(
-        policy: posterRowTraversal,
-        child: EdgeFade(
-        controller: _scroller,
-        child: SingleChildScrollView(
+      child: SingleChildScrollView(
         controller: _scroller,
         scrollDirection: Axis.horizontal,
         clipBehavior: Clip.hardEdge,
@@ -328,8 +322,6 @@ class _SlidingWindowState extends State<SlidingWindow> {
             ],
           ),
         ),
-        ),
-      ),
       ),
     );
   }

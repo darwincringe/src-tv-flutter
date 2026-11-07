@@ -9,7 +9,6 @@ import '../../core/focus.dart';
 import '../../core/theme.dart';
 import '../../data/repository/media_repository.dart';
 import '../../data/store/watch_progress.dart';
-import 'edge_fade.dart';
 import 'poster_card.dart';
 import 'watched_check.dart';
 
@@ -295,11 +294,7 @@ class _PagedPosterGridState extends State<PagedPosterGrid> {
     return SizedBox(
       width: width,
       height: height,
-      child: FocusTraversalGroup(
-        policy: posterRowTraversal,
-        child: EdgeFade(
-        controller: _scroller,
-        child: SingleChildScrollView(
+      child: SingleChildScrollView(
         controller: _scroller,
         scrollDirection: Axis.horizontal,
         clipBehavior: Clip.hardEdge,
@@ -318,8 +313,6 @@ class _PagedPosterGridState extends State<PagedPosterGrid> {
             ],
           ),
         ),
-        ),
-      ),
       ),
     );
   }
@@ -541,7 +534,6 @@ class _ContinueWatchingCard extends StatelessWidget {
       onFocusChange: onFocusChange,
       focusedScale: 1.04,
       borderWidth: 2.5,
-      ensureVisibleOnFocus: true,
       borderRadius: BorderRadius.circular(10),
       child: AspectRatio(
         aspectRatio: 2 / 3,

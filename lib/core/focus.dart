@@ -3,66 +3,6 @@ import 'package:flutter/services.dart';
 
 import 'theme.dart';
 
-/// Directional focus inside a horizontal poster row.
-///
-/// The default policy scrolls every ancestor. A right press therefore uses
-/// "keep visible at the end" on the page as well as the row, and a left press
-/// uses "keep visible at the start", so the page creeps down and back up.
-/// This policy slides the row and leaves the page still while focus stays in it.
-class PosterRowTraversalPolicy extends ReadingOrderTraversalPolicy {
-  PosterRowTraversalPolicy() : super(requestFocusCallback: revealPosterRow);
-}
-
-final PosterRowTraversalPolicy posterRowTraversal = PosterRowTraversalPolicy();
-
-void revealPosterRow(
-  FocusNode node, {
-  ScrollPositionAlignmentPolicy? alignmentPolicy,
-  double? alignment,
-  Duration? duration,
-  Curve? curve,
-}) {
-  final fromRow = _horizontalRowOf(FocusManager.instance.primaryFocus?.context);
-  node.requestFocus();
-  final context = node.context;
-  if (context == null || !context.mounted) return;
-  final render = context.findRenderObject();
-  final row = _horizontalRowOf(context);
-  if (render == null || row == null) return;
-
-  row.position.ensureVisible(
-    render,
-    alignment: alignment ?? 0.5,
-    alignmentPolicy:
-        alignmentPolicy ?? ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
-    duration: duration ?? const Duration(milliseconds: 180),
-    curve: curve ?? Curves.easeOut,
-  );
-
-  final page = Scrollable.maybeOf(row.context);
-  if (page == null || page.position.axis != Axis.vertical) return;
-  // Same row: the card is already at this height. Don't touch the page.
-  if (fromRow != null && identical(fromRow, row)) return;
-
-  final rowBox = row.context.findRenderObject();
-  if (rowBox == null) return;
-  page.position.ensureVisible(
-    rowBox,
-    alignment: 0.12,
-    duration: const Duration(milliseconds: 220),
-    curve: Curves.easeOut,
-  );
-}
-
-ScrollableState? _horizontalRowOf(BuildContext? context) {
-  if (context == null) return null;
-  final scrollable = Scrollable.maybeOf(context);
-  if (scrollable == null || scrollable.position.axis != Axis.horizontal) {
-    return null;
-  }
-  return scrollable;
-}
-
 /// Wraps a text field so D-pad Up/Down move focus OUT of it. Text fields
 /// otherwise consume the arrow keys (to move the caret), which traps focus on
 /// the field and stops a TV remote from reaching the next field or the results
@@ -182,13 +122,8 @@ class _FocusableCardState extends State<FocusableCard> {
     if (f && widget.ensureVisibleOnFocus) {
       // Shortly after the framework's own directional-focus scroll, so our
       // alignment (with headroom for titles/edges) is the one that sticks.
-      // A horizontal row has its own policy and must not drag the page.
       Future.delayed(const Duration(milliseconds: 80), () {
         if (!mounted) return;
-        final scrollable = Scrollable.maybeOf(context);
-        if (scrollable != null && scrollable.position.axis == Axis.horizontal) {
-          return;
-        }
         Scrollable.ensureVisible(
           context,
           alignment: widget.ensureVisibleAlignment,

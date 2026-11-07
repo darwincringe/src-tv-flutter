@@ -101,11 +101,22 @@ class _CategoryRowSectionState extends State<CategoryRowSection> {
                     if (focused) {
                       _focusGen++;
                       final entered = _focusedIndex == null;
+                      final page = Scrollable.maybeOf(context, axis: Axis.vertical);
+                      final pixels = page?.position.hasPixels == true
+                          ? page!.position.pixels
+                          : null;
                       _focusedIndex = index;
                       widget.onItemFocus?.call(item);
-                      // Left/right stays in this row. Scrolling the section
-                      // again is what nudges the page up and down.
-                      if (entered) _ensureSectionVisible();
+                      if (entered) {
+                        _ensureSectionVisible();
+                      } else if (page != null && pixels != null) {
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          if (!mounted || !page.position.hasPixels) return;
+                          if ((page.position.pixels - pixels).abs() > 0.5) {
+                            page.position.jumpTo(pixels);
+                          }
+                        });
+                      }
                     } else {
                       final token = ++_focusGen;
                       final leaving = index;
