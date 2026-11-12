@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../core/focus.dart';
 import '../../core/theme.dart';
 import '../../data/models/media_details.dart';
 import '../../data/models/media_item.dart';
@@ -107,6 +108,9 @@ class _CategoryRowSectionState extends State<CategoryRowSection> {
                           : null;
                       _focusedIndex = index;
                       widget.onItemFocus?.call(item);
+                      // Hover selects the card in place. Scrolling here would
+                      // fight the mouse wheel.
+                      if (webHoverSelecting) return;
                       if (entered) {
                         _ensureSectionVisible();
                       } else if (page != null && pixels != null) {

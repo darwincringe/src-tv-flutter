@@ -4,6 +4,10 @@ import 'package:flutter/services.dart';
 
 import 'theme.dart';
 
+/// True while a website hover is selecting a card. Scroll reactions must
+/// ignore that selection so the page stays where the pointer left it.
+bool webHoverSelecting = false;
+
 /// The packaged TV build is a web app with no pointer. Hover-to-select is only
 /// for the website.
 const _tizenWeb = bool.fromEnvironment('TIZEN_WEB');
@@ -122,9 +126,10 @@ class _FocusableCardState extends State<FocusableCard> {
 
   void _setFocus(bool f) {
     if (_focused == f) return;
+    final fromHover = webHoverSelecting;
     setState(() => _focused = f);
     widget.onFocusChange?.call(f);
-    if (f && widget.ensureVisibleOnFocus) {
+    if (f && widget.ensureVisibleOnFocus && !fromHover) {
       // Shortly after the framework's own directional-focus scroll, so our
       // alignment (with headroom for titles/edges) is the one that sticks.
       Future.delayed(const Duration(milliseconds: 80), () {
@@ -137,6 +142,43 @@ class _FocusableCardState extends State<FocusableCard> {
           curve: Curves.easeOut,
         );
       });
+    }
+  }
+
+  /// Selects the card under the pointer without moving any scroll view.
+  void _selectByHover(BuildContext focusContext) {
+    if (!kIsWeb || _tizenWeb) return;
+    final node = Focus.maybeOf(focusContext);
+    if (node == null || node.hasFocus) return;
+    final saved = _scrollOffsets(focusContext);
+    webHoverSelecting = true;
+    node.requestFocus();
+    webHoverSelecting = false;
+    _restoreScroll(saved);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _restoreScroll(saved));
+  }
+
+  List<(ScrollPosition, double)> _scrollOffsets(BuildContext context) {
+    final saved = <(ScrollPosition, double)>[];
+    final seen = <ScrollPosition>{};
+    var current = context;
+    while (true) {
+      final scrollable = Scrollable.maybeOf(current);
+      if (scrollable == null) break;
+      final position = scrollable.position;
+      if (position.hasPixels && seen.add(position)) {
+        saved.add((position, position.pixels));
+      }
+      current = scrollable.context;
+    }
+    return saved;
+  }
+
+  void _restoreScroll(List<(ScrollPosition, double)> saved) {
+    for (final (position, pixels) in saved) {
+      if (!position.hasPixels) continue;
+      if ((position.pixels - pixels).abs() <= 0.5) continue;
+      position.jumpTo(pixels);
     }
   }
 
@@ -168,12 +210,7 @@ class _FocusableCardState extends State<FocusableCard> {
       child: Builder(
         builder: (focusContext) {
           return MouseRegion(
-            // On the website, moving the pointer onto a card selects it, so
-            // the ring, the scale, and the hero follow the mouse.
-            onEnter: (_) {
-              if (!kIsWeb || _tizenWeb) return;
-              Focus.maybeOf(focusContext)?.requestFocus();
-            },
+            onEnter: (_) => _selectByHover(focusContext),
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: widget.onTap,
