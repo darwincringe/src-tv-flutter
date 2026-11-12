@@ -1,7 +1,12 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'theme.dart';
+
+/// The packaged TV build is a web app with no pointer. Hover-to-select is only
+/// for the website.
+const _tizenWeb = bool.fromEnvironment('TIZEN_WEB');
 
 /// Wraps a text field so D-pad Up/Down move focus OUT of it. Text fields
 /// otherwise consume the arrow keys (to move the caret), which traps focus on
@@ -160,34 +165,46 @@ class _FocusableCardState extends State<FocusableCard> {
           },
         ),
       },
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: widget.onTap,
-        // Isolate the focus scale/border tween to this card's own layer so it
-        // doesn't repaint the whole row + hero backdrop on every focus hop.
-        child: RepaintBoundary(
-          child: AnimatedScale(
-            scale: _focused ? widget.focusedScale : 1.0,
-            duration: const Duration(milliseconds: 120),
-            child: Container(
-              decoration: BoxDecoration(
-                borderRadius: widget.borderRadius,
-                border: widget.showBorder
-                    ? Border.all(
-                        color: _focused
-                            ? AppColors.focusRing
-                            : Colors.transparent,
-                        width: widget.borderWidth,
-                      )
-                    : null,
-              ),
-              child: ClipRRect(
-                borderRadius: widget.borderRadius,
-                child: widget.child,
+      child: Builder(
+        builder: (focusContext) {
+          return MouseRegion(
+            // On the website, moving the pointer onto a card selects it, so
+            // the ring, the scale, and the hero follow the mouse.
+            onEnter: (_) {
+              if (!kIsWeb || _tizenWeb) return;
+              Focus.maybeOf(focusContext)?.requestFocus();
+            },
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: widget.onTap,
+              // Isolate the focus scale/border tween to this card's own layer
+              // so it doesn't repaint the whole row and hero on every hop.
+              child: RepaintBoundary(
+                child: AnimatedScale(
+                  scale: _focused ? widget.focusedScale : 1.0,
+                  duration: const Duration(milliseconds: 120),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      borderRadius: widget.borderRadius,
+                      border: widget.showBorder
+                          ? Border.all(
+                              color: _focused
+                                  ? AppColors.focusRing
+                                  : Colors.transparent,
+                              width: widget.borderWidth,
+                            )
+                          : null,
+                    ),
+                    child: ClipRRect(
+                      borderRadius: widget.borderRadius,
+                      child: widget.child,
+                    ),
+                  ),
+                ),
               ),
             ),
-          ),
-        ),
+          );
+        },
       ),
     );
   }
