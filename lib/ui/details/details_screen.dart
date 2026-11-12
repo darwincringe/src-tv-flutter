@@ -512,6 +512,7 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
                     tmdbId: d.id,
                     season: _selectedSeason,
                     episode: ep,
+                    posterPath: d.posterPath,
                     flush: true,
                     focusNode: focusNode,
                     onTap: () => playStream(
@@ -527,6 +528,7 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
                 },
                 seeMoreBuilder: (context, i, focusNode, onTap) => _EpisodeSeeMore(
                   episode: _episodes[i],
+                  posterPath: d.posterPath,
                   focusNode: focusNode,
                   onTap: onTap,
                 ),
@@ -924,19 +926,21 @@ class _EpisodeRow extends StatelessWidget {
     required this.season,
     required this.episode,
     required this.onTap,
+    this.posterPath,
     this.focusNode,
     this.flush = false,
   });
   final int tmdbId;
   final int season;
   final Episode episode;
+  final String? posterPath;
   final VoidCallback onTap;
   final FocusNode? focusNode;
   final bool flush;
 
   @override
   Widget build(BuildContext context) {
-    final still = stillUrl(episode.stillPath);
+    final still = stillUrl(episode.stillPath) ?? posterUrl(posterPath);
     final comingSoon = isComingSoon(episode.airDate);
     final meta = <String>[];
     if (episode.runtime != null) meta.add('${episode.runtime}m');
@@ -1054,15 +1058,17 @@ class _EpisodeSeeMore extends StatelessWidget {
     required this.episode,
     required this.onTap,
     required this.focusNode,
+    this.posterPath,
   });
 
   final Episode episode;
+  final String? posterPath;
   final VoidCallback onTap;
   final FocusNode focusNode;
 
   @override
   Widget build(BuildContext context) {
-    final still = stillUrl(episode.stillPath);
+    final still = stillUrl(episode.stillPath) ?? posterUrl(posterPath);
     return FocusableCard(
       onTap: onTap,
       focusNode: focusNode,
