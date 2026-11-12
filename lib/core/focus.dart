@@ -4,9 +4,14 @@ import 'package:flutter/services.dart';
 
 import 'theme.dart';
 
-/// True while a website hover is selecting a card. Scroll reactions must
-/// ignore that selection so the page stays where the pointer left it.
+/// True while a website hover is telling a row which card is under the
+/// pointer. That notification must not scroll: focus is unchanged, and the
+/// page stays where the wheel left it.
 bool webHoverSelecting = false;
+
+/// How many cards the pointer is inside. While this is above zero, only the
+/// hovered card draws a ring, so a keyboard focus ring does not sit beside it.
+final ValueNotifier<int> _websiteHoverDepth = ValueNotifier<int>(0);
 
 /// The packaged TV build is a web app with no pointer. Hover-to-select is only
 /// for the website.
@@ -123,13 +128,46 @@ class FocusableCard extends StatefulWidget {
 
 class _FocusableCardState extends State<FocusableCard> {
   bool _focused = false;
+  bool _hovered = false;
+
+  bool get _website => kIsWeb && !_tizenWeb;
+
+  /// Keyboard focus draws the ring, except while the pointer is over a card.
+  /// Hover never takes focus, so it cannot scroll the page.
+  bool get _highlighted {
+    if (_website && _websiteHoverDepth.value > 0) return _hovered;
+    return _focused;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    if (_website) _websiteHoverDepth.addListener(_onHoverDepth);
+  }
+
+  @override
+  void dispose() {
+    if (_website) {
+      _websiteHoverDepth.removeListener(_onHoverDepth);
+      if (_hovered) {
+        _hovered = false;
+        final next = _websiteHoverDepth.value - 1;
+        _websiteHoverDepth.value = next < 0 ? 0 : next;
+      }
+    }
+    super.dispose();
+  }
+
+  void _onHoverDepth() {
+    if (!mounted) return;
+    if (_focused || _hovered) setState(() {});
+  }
 
   void _setFocus(bool f) {
     if (_focused == f) return;
-    final fromHover = webHoverSelecting;
     setState(() => _focused = f);
     widget.onFocusChange?.call(f);
-    if (f && widget.ensureVisibleOnFocus && !fromHover) {
+    if (f && widget.ensureVisibleOnFocus) {
       // Shortly after the framework's own directional-focus scroll, so our
       // alignment (with headroom for titles/edges) is the one that sticks.
       Future.delayed(const Duration(milliseconds: 80), () {
@@ -145,46 +183,39 @@ class _FocusableCardState extends State<FocusableCard> {
     }
   }
 
-  /// Selects the card under the pointer without moving any scroll view.
-  void _selectByHover(BuildContext focusContext) {
-    if (!kIsWeb || _tizenWeb) return;
-    final node = Focus.maybeOf(focusContext);
-    if (node == null || node.hasFocus) return;
-    final saved = _scrollOffsets(focusContext);
+  void _hoverEnter() {
+    if (!_website || _hovered) return;
+    setState(() => _hovered = true);
+    _websiteHoverDepth.value++;
+    if (_focused) return;
+    _notifyHover(true);
+  }
+
+  void _hoverExit() {
+    if (!_hovered) return;
+    setState(() => _hovered = false);
+    final next = _websiteHoverDepth.value - 1;
+    _websiteHoverDepth.value = next < 0 ? 0 : next;
+    if (_focused) return;
+    _notifyHover(false);
+  }
+
+  /// Tells the row which card the pointer is on. The flag is held for the
+  /// whole call so the row can update the hero and skip every scroll.
+  void _notifyHover(bool selected) {
+    final callback = widget.onFocusChange;
+    if (callback == null) return;
     webHoverSelecting = true;
-    node.requestFocus();
-    webHoverSelecting = false;
-    _restoreScroll(saved);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _restoreScroll(saved));
-  }
-
-  List<(ScrollPosition, double)> _scrollOffsets(BuildContext context) {
-    final saved = <(ScrollPosition, double)>[];
-    final seen = <ScrollPosition>{};
-    var current = context;
-    while (true) {
-      final scrollable = Scrollable.maybeOf(current);
-      if (scrollable == null) break;
-      final position = scrollable.position;
-      if (position.hasPixels && seen.add(position)) {
-        saved.add((position, position.pixels));
-      }
-      current = scrollable.context;
-    }
-    return saved;
-  }
-
-  void _restoreScroll(List<(ScrollPosition, double)> saved) {
-    for (final (position, pixels) in saved) {
-      if (!position.hasPixels) continue;
-      if ((position.pixels - pixels).abs() <= 0.5) continue;
-      position.jumpTo(pixels);
+    try {
+      callback(selected);
+    } finally {
+      webHoverSelecting = false;
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return FocusableActionDetector(
+    final card = FocusableActionDetector(
       focusNode: widget.focusNode,
       autofocus: widget.autofocus,
       onFocusChange: _setFocus,
@@ -207,42 +238,41 @@ class _FocusableCardState extends State<FocusableCard> {
           },
         ),
       },
-      child: Builder(
-        builder: (focusContext) {
-          return MouseRegion(
-            onEnter: (_) => _selectByHover(focusContext),
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: widget.onTap,
-              // Isolate the focus scale/border tween to this card's own layer
-              // so it doesn't repaint the whole row and hero on every hop.
-              child: RepaintBoundary(
-                child: AnimatedScale(
-                  scale: _focused ? widget.focusedScale : 1.0,
-                  duration: const Duration(milliseconds: 120),
-                  child: Container(
-                    decoration: BoxDecoration(
-                      borderRadius: widget.borderRadius,
-                      border: widget.showBorder
-                          ? Border.all(
-                              color: _focused
-                                  ? AppColors.focusRing
-                                  : Colors.transparent,
-                              width: widget.borderWidth,
-                            )
-                          : null,
-                    ),
-                    child: ClipRRect(
-                      borderRadius: widget.borderRadius,
-                      child: widget.child,
-                    ),
-                  ),
-                ),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        // Isolate the focus scale/border tween to this card's own layer
+        // so it doesn't repaint the whole row and hero on every hop.
+        child: RepaintBoundary(
+          child: AnimatedScale(
+            scale: _highlighted ? widget.focusedScale : 1.0,
+            duration: const Duration(milliseconds: 120),
+            child: Container(
+              decoration: BoxDecoration(
+                borderRadius: widget.borderRadius,
+                border: widget.showBorder
+                    ? Border.all(
+                        color: _highlighted
+                            ? AppColors.focusRing
+                            : Colors.transparent,
+                        width: widget.borderWidth,
+                      )
+                    : null,
+              ),
+              child: ClipRRect(
+                borderRadius: widget.borderRadius,
+                child: widget.child,
               ),
             ),
-          );
-        },
+          ),
+        ),
       ),
+    );
+    if (!_website) return card;
+    return MouseRegion(
+      onEnter: (_) => _hoverEnter(),
+      onExit: (_) => _hoverExit(),
+      child: card,
     );
   }
 }
