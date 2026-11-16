@@ -436,7 +436,10 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   void _selectMirror(int index) {
-    if (_loading || index < 0 || index >= _mirrors.length || index == _mirrorIndex) {
+    // The website can switch to a source that has already arrived while the
+    // file is still loading. The TV build keeps the loading screen clear.
+    if (_loading && _tizenWeb) return;
+    if (index < 0 || index >= _mirrors.length || index == _mirrorIndex) {
       return;
     }
     final mirror = _mirrors[index];
@@ -448,7 +451,9 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
       _a.type == 'tv' ? _season : null,
     );
     // Keep the timestamp across the source change. loadedmetadata applies it.
-    _resumeTargetMs = pos;
+    // A switch during the first load must keep the saved resume point; the
+    // clock is still 0 until the file actually starts.
+    if (!_loading) _resumeTargetMs = pos;
     _metadataSeekDone = false;
     _metadataToken = _mediaToken;
     _resumeDone = false;
@@ -1794,23 +1799,41 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
     }
   }
 
-  Widget _loaderOverlay() => Container(
-        color: Colors.black,
-        alignment: Alignment.center,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(
-              width: 42,
-              height: 42,
-              child: CircularProgressIndicator(
-                  strokeWidth: 3, color: Colors.white),
+  Widget _loaderOverlay() => Stack(
+        fit: StackFit.expand,
+        children: [
+          const ColoredBox(color: Colors.black),
+          Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(
+                  width: 42,
+                  height: 42,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 3, color: Colors.white),
+                ),
+                const SizedBox(height: 16),
+                Text(_headerTitle(),
+                    style: const TextStyle(color: AppColors.textSecondary)),
+              ],
             ),
-            const SizedBox(height: 16),
-            Text(_headerTitle(),
-                style: const TextStyle(color: AppColors.textSecondary)),
-          ],
-        ),
+          ),
+          if (!_tizenWeb && _mirrors.isNotEmpty)
+            Positioned(
+              top: 56,
+              left: 60,
+              right: 16,
+              child: PointerInterceptor(
+                child: MirrorBar(
+                  mirrors: _mirrors,
+                  selected: _mirrorIndex,
+                  focusNodes: _mirrorNodes,
+                  onSelect: _selectMirror,
+                ),
+              ),
+            ),
+        ],
       );
 
   Widget _errorOverlay() => Container(
