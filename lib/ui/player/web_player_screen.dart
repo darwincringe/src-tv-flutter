@@ -180,6 +180,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
 
   // Series / episode nav.
   bool _isTv = false;
+  bool _catalogReady = false;
   List<Season> _seasons = const [];
   int? _season;
   int? _episode;
@@ -372,6 +373,7 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
         _title = d.title;
         _isTv = d.isTv;
         _seasons = d.seasons;
+        _catalogReady = true;
       } catch (_) {}
     }
     if (!mounted || token != _mediaToken) return;
@@ -742,7 +744,8 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
 
   void _markCompleted() {
     if (_a.mode != PlayerMode.stream) return;
-    if (_isTv && _nextRef != null) {
+    final tv = _a.type == 'tv' || _isTv;
+    if (tv && _nextRef != null) {
       // Queue the next episode at position 0 so Continue Watching advances.
       WatchProgressStore.save(WatchProgress(
         tmdbId: _a.tmdbId!,
@@ -755,6 +758,24 @@ class _WebPlayerScreenState extends ConsumerState<PlayerScreen> {
         title: _title,
         posterPath: _a.posterPath ?? _a.backdropPath,
       posterChecked: _a.posterPath != null && _a.posterPath!.isNotEmpty,
+        completed: false,
+      ), finishedSeason: _season, finishedEpisode: _episode);
+    } else if (tv && !_catalogReady) {
+      // The season list is not in yet, so this episode ending is not the
+      // series ending. Keep the finished file; details opens the next one.
+      final dur = _durationMs;
+      if (dur <= 0) return;
+      WatchProgressStore.save(WatchProgress(
+        tmdbId: _a.tmdbId!,
+        type: 'tv',
+        season: _season,
+        episode: _episode,
+        positionMs: dur,
+        durationMs: dur,
+        updatedAt: _now,
+        title: _title,
+        posterPath: _a.posterPath ?? _a.backdropPath,
+        posterChecked: _a.posterPath != null && _a.posterPath!.isNotEmpty,
         completed: false,
       ), finishedSeason: _season, finishedEpisode: _episode);
     } else {

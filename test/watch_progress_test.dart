@@ -164,6 +164,45 @@ void main() {
       expect(advanced.isEpisodeWatched(1, 3), isTrue);
       expect(advanced.isEpisodeWatched(1, 4), isFalse);
     });
+
+    test('a finished episode resumes on the next one, not the series end', () {
+      const done = WatchProgress(
+        tmdbId: 3,
+        type: 'tv',
+        season: 1,
+        episode: 3,
+        positionMs: 2400000,
+        durationMs: 2400000,
+        completed: true,
+      );
+      expect(done.finishedEpisode, isTrue);
+      expect(
+        episodeAfterFinished(done, episodeCount: 8, nextSeason: 2),
+        (season: 1, episode: 4),
+      );
+      expect(
+        episodeAfterFinished(done, episodeCount: 3, nextSeason: 2),
+        (season: 2, episode: 1),
+      );
+      expect(
+        episodeAfterFinished(done, episodeCount: 3, nextSeason: null),
+        isNull,
+      );
+
+      const mid = WatchProgress(
+        tmdbId: 3,
+        type: 'tv',
+        season: 1,
+        episode: 3,
+        positionMs: 400000,
+        durationMs: 1000000,
+      );
+      expect(mid.finishedEpisode, isFalse);
+      expect(
+        episodeAfterFinished(mid, episodeCount: 8, nextSeason: 2),
+        isNull,
+      );
+    });
   });
 
   test('the store keeps a watched mark through a later save', () async {

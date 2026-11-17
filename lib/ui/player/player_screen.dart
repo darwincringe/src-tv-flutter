@@ -89,6 +89,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   // actually visible even when it buffers in well under a second.
   int _minLoaderUntilMs = 0;
   bool _isTv = false;
+  bool _catalogReady = false;
 
   // Loading-screen progress (0..100), animated up while buffering.
   double _loadProgress = 0;
@@ -463,6 +464,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         _backdropPath = d.backdropPath;
         _isTv = d.isTv;
         _seasons = d.seasons;
+        _catalogReady = true;
         if (mounted) setState(() {});
       } catch (_) {}
     }
@@ -1256,7 +1258,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   void _markReachedEnd() {
-    if (_isTv && _nextRef != null) {
+    final tv = _type == 'tv' || _isTv;
+    if (tv && _nextRef != null) {
       WatchProgressStore.save(WatchProgress(
         tmdbId: _tmdbId,
         type: 'tv',
@@ -1264,6 +1267,21 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         episode: _nextRef!.episode,
         positionMs: 0,
         durationMs: 0,
+        updatedAt: _now,
+        title: _mediaTitle,
+        posterPath: _posterPath,
+        completed: false,
+      ), finishedSeason: _season, finishedEpisode: _episode);
+    } else if (tv && !_catalogReady) {
+      final dur = _duration.inMilliseconds;
+      if (dur <= 0) return;
+      WatchProgressStore.save(WatchProgress(
+        tmdbId: _tmdbId,
+        type: 'tv',
+        season: _season,
+        episode: _episode,
+        positionMs: dur,
+        durationMs: dur,
         updatedAt: _now,
         title: _mediaTitle,
         posterPath: _posterPath,

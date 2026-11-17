@@ -13,6 +13,26 @@ bool reachedWatchedThreshold(int positionMs, int durationMs) =>
 /// Key for one episode inside a series progress record.
 String watchedEpisodeKey(int season, int episode) => '$season-$episode';
 
+/// Where Resume should open after [progress] finished an episode.
+/// [episodeCount] is that season's length. [nextSeason] is the following
+/// season that still has episodes. Unknown length stays on the next episode
+/// of the same season, so one finished episode is not treated as a finished
+/// series. A known finale returns null.
+({int season, int episode})? episodeAfterFinished(
+  WatchProgress progress, {
+  required int episodeCount,
+  required int? nextSeason,
+}) {
+  if (!progress.finishedEpisode) return null;
+  final season = progress.season!;
+  final episode = progress.episode!;
+  if (episodeCount <= 0 || episode < episodeCount) {
+    return (season: season, episode: episode + 1);
+  }
+  if (nextSeason == null) return null;
+  return (season: nextSeason, episode: 1);
+}
+
 /// Keeps a watched mark that was already earned. [next] is the new resume
 /// point (often 50% on a rewatch). [previous] is the record already stored.
 /// [finishedSeason] and [finishedEpisode] mark an episode that just ended
@@ -119,6 +139,14 @@ class WatchProgress {
   bool get isContinuable =>
       !completed &&
       (isResumable || (type == 'tv' && (positionMs == 0 || positionMs > 5000)));
+
+  /// This episode is at the end. Opening it again would start it over, so a
+  /// series should continue on the next episode instead of counting as done.
+  bool get finishedEpisode {
+    if (type != 'tv' || season == null || episode == null) return false;
+    if (durationMs <= 0 || positionMs <= 5000) return false;
+    return positionMs >= durationMs - 10000;
+  }
 
   double get watchedFraction =>
       durationMs > 0 ? (positionMs / durationMs).clamp(0.0, 1.0) : 0.0;

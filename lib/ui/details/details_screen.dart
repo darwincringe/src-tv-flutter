@@ -155,7 +155,42 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
     }
   }
 
-  bool get _resumable => _progress?.isContinuable == true;
+  bool get _resumable {
+    final p = _progress;
+    if (p == null) return false;
+    if (_advanceTarget != null) return true;
+    // A finished episode with nothing after it is the end of the series.
+    if (p.finishedEpisode) return false;
+    return p.isContinuable;
+  }
+
+  /// Next episode when the saved one is finished. Null while the user is
+  /// still in the middle of an episode, and null on a real finale.
+  ({int season, int episode})? get _advanceTarget {
+    final p = _progress;
+    final d = _details;
+    if (p == null || d == null || !d.isTv) return null;
+    final season = p.season;
+    if (season == null) return null;
+    var count = 0;
+    int? nextSeason;
+    final later = <int>[];
+    for (final s in d.seasons) {
+      if (s.seasonNumber == season) count = s.episodeCount ?? 0;
+      if (s.seasonNumber > season && (s.episodeCount ?? 0) > 0) {
+        later.add(s.seasonNumber);
+      }
+    }
+    if (later.isNotEmpty) {
+      later.sort();
+      nextSeason = later.first;
+    }
+    return episodeAfterFinished(
+      p,
+      episodeCount: count,
+      nextSeason: nextSeason,
+    );
+  }
 
   void _onPlay() {
     final d = _details!;
@@ -170,6 +205,33 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
       return;
     }
     final saved = _progress;
+    final next = _advanceTarget;
+    if (next != null && saved != null) {
+      WatchProgressStore.save(
+        WatchProgress(
+          tmdbId: d.id,
+          type: 'tv',
+          season: next.season,
+          episode: next.episode,
+          updatedAt: DateTime.now().millisecondsSinceEpoch,
+          title: d.title,
+          posterPath: d.posterPath,
+          posterChecked: d.posterPath != null && d.posterPath!.isNotEmpty,
+        ),
+        finishedSeason: saved.season,
+        finishedEpisode: saved.episode,
+      );
+      playStream(
+        context,
+        tmdbId: d.id,
+        type: 'tv',
+        season: next.season,
+        episode: next.episode,
+        backdropPath: d.backdropPath,
+        posterPath: d.posterPath,
+      );
+      return;
+    }
     if (_resumable && saved?.episode != null) {
       playStream(
         context,
@@ -403,8 +465,11 @@ class _DetailsScreenState extends ConsumerState<DetailsScreen>
     }
     if (d.language != null) parts.add(d.language!);
     // Where the user left off (resume point), beside the language.
-    if (d.isTv && _resumable && _progress?.episode != null) {
-      parts.add('S${_progress!.season ?? 1} E${_progress!.episode}');
+    if (d.isTv && _resumable) {
+      final next = _advanceTarget;
+      final season = next?.season ?? _progress?.season ?? 1;
+      final episode = next?.episode ?? _progress?.episode;
+      if (episode != null) parts.add('S$season E$episode');
     }
     return Text(
       parts.join('   •   '),
