@@ -18,11 +18,25 @@
 
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>SRC TV — Movies &amp; Series</title>
   <meta name="description" content="SRC TV — browse movies and series, save what you want to watch, and pick up where you left off.">
   <meta name="application-name" content="SRC TV">
+  <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#161616">
+  <!-- Safari on iPhone paints the default white page in the gap around the
+       app (status bar and the strip above the bottom toolbar). Keep that
+       the same black as the app. -->
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background-color: #161616 !important;
+      color-scheme: dark;
+      height: 100%;
+      height: 100dvh;
+    }
+  </style>
   <meta name="robots" content="index,follow">
   <link rel="canonical" href="https://srctv.space/">
 
